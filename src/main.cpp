@@ -124,6 +124,8 @@ static void buzzerOff()
   ledcWriteTone(BUZZER_LEDC_CHANNEL, 0);
 }
 
+
+//critical alert through led and buzzer
 static void triggerCriticalAlert(int beepCount)
 {
   for (int i = 0; i < beepCount; i++)
@@ -217,6 +219,17 @@ static void printWiringChecklist()
 }
 
 // ==========================================================
+// WORKFLOW EXPLANATION: DATA TRAVEL PIPELINE - STEP 1 (Data Collection)
+// How data travels:
+// 1. The main loop() calls ads.readECGSample() at 2000 times per second (SPS).
+// 2. The raw sample is immediately passed to this pushSample() function.
+// 3. This function stores the sample into a "ping-pong" buffer (g_buffers).
+//    A ping-pong buffer means there are two arrays. While one is being filled, 
+//    the other is being processed, ensuring we never miss a sample.
+// 4. Once a buffer fills up (reaches WINDOW_SIZE, e.g., 2000 samples), 
+//    it signals the DSP task (s_dspTaskHandle) to start processing it.
+// To change main things (e.g., WINDOW_SIZE): Check types.h or config.h
+// ==========================================================
 // pushSample
 // -----------------------------------------------------------
 // Called from loop() at 500 Hz immediately after DRDY fires.
@@ -256,6 +269,17 @@ static void pushSample(int32_t raw24, bool lo, bool loPlusOff,
   portEXIT_CRITICAL(&g_bufMux);
 }
 
+// ==========================================================
+// WORKFLOW EXPLANATION: DATA TRAVEL PIPELINE - STEP 2 (Data Processing)
+// How data is processed:
+// 1. This function is awakened by the dspTask when a full block of data is ready.
+// 2. It takes the full buffer and applies various filters (e.g., pipeline->processBlock)
+//    to remove noise and baseline wander.
+// 3. It calculates Heart Rate (BPM), detects peaks, and determines signal quality.
+// 4. Finally, it sends the fully processed block to the Network (WiFi) and BLE 
+//    queues via network_uploadBlock() and ble_uploadBlock().
+// To change main things: Look at the pipeline->processBlock() function for filters, 
+// or modify the detectPeaks() call to change heart rate algorithms.
 // ==========================================================
 // processBlock
 // ==========================================================
@@ -485,6 +509,17 @@ static void processBlock()
         "Warming up (" + String(g_analysisSampleCount / WINDOW_SIZE) + "/5)";
   }
 
+  // ==========================================================
+  // WORKFLOW EXPLANATION: DATA TRAVEL PIPELINE - STEP 3 (Dispatching Data)
+  // How data is sent:
+  // 1. We have the fully processed block and all the calculated metrics.
+  // 2. We send it to two separate channels simultaneously:
+  //    a) network_uploadBlock: Queues the data to be sent over WiFi (to a backend server via WebSocket/HTTP).
+  //    b) ble_uploadBlock: Sends the data directly to a connected mobile app via Bluetooth Low Energy (BLE).
+  // 3. These calls do NOT block the main loop. They just copy the data to queues.
+  // To change main things: If you want to disable WiFi upload, comment out network_uploadBlock. 
+  // If you want to disable BLE, comment out ble_uploadBlock.
+  // ==========================================================
   // WiFi upload queue (Core 0) + Direct BLE binary streaming (All metrics + raw + filtered)
   network_uploadBlock(blk, false, loPlus, loMinus, condition.c_str(),
                       severity.c_str(), dsp_only_data, &metrics,
@@ -641,6 +676,7 @@ void loop()
     s_lastMaintMs = now;
     imu.update();
     network_update();
+    buzzer_update();
   }
 
   if ((now - g_lastRateCheck) >= RATE_CHECK_MS)

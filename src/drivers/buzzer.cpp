@@ -7,6 +7,7 @@
 
 #include "buzzer.h"
 #include "pin_config.h"
+#include "config.h"
 
 #define BUZZER_LEDC_CHANNEL          0
 #define BUZZER_LEDC_RESOLUTION_BITS  8
@@ -74,5 +75,44 @@ void buzzer_thermalShutdown() {
         delay(180);
         buzzer_off();
         delay(100);
+    }
+}
+
+static bool isBuzzing = false;
+static uint32_t buzzTimer = 0;
+static int buzzSequence = 0;
+
+void start_thermal_warning() {
+    if (BUZZER_PIN < 0) return;
+    if (!isBuzzing) {
+        isBuzzing = true;
+        buzzSequence = 0;
+        buzzTimer = millis();
+    }
+}
+
+void buzzer_update() {
+    if (!isBuzzing) return;
+
+    uint32_t now = millis();
+    
+    if (buzzSequence == 0 && now - buzzTimer >= 0) {
+        buzzer_on(2800);
+        buzzSequence++;
+        buzzTimer = now;
+    } 
+    else if (buzzSequence == 1 && now - buzzTimer >= 180) { // After 180ms
+        buzzer_off();
+        buzzSequence++;
+        buzzTimer = now;
+    }
+    else if (buzzSequence == 2 && now - buzzTimer >= 100) { // After 100ms pause
+        buzzer_on(3200);
+        buzzSequence++;
+        buzzTimer = now;
+    }
+    else if (buzzSequence == 3 && now - buzzTimer >= 180) { // After 180ms
+        buzzer_off();
+        isBuzzing = false; // Sequence finished!
     }
 }

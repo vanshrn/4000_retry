@@ -598,6 +598,16 @@ bool network_isConnected()
 // -----------------------------------------------------------
 // -----------------------------------------------------------
 // -----------------------------------------------------------
+// ==========================================================
+// WORKFLOW EXPLANATION: DATA TRAVEL PIPELINE - STEP 4 (Network Queueing)
+// How data travels:
+// 1. This function is called by the DSP task. It's designed to be extremely fast and NON-BLOCKING.
+// 2. Instead of waiting for a slow WiFi connection to send the data, it takes the processed
+//    block (blk) and puts it into a FreeRTOS queue (s_uploadQueue).
+// 3. This allows the DSP task to immediately go back to processing the next block without dropping samples.
+// To change main things: The queue depth is UPLOAD_QUEUE_DEPTH (check config.h or network.h).
+// If the network is slow, this queue buffers the data. If it fills up, the oldest data might be dropped.
+// ==========================================================
 // network_uploadBlock() — non-blocking, called from loop()
 // -----------------------------------------------------------
 bool network_uploadBlock(const Block &blk, bool leadsOff, bool loPlus,
@@ -933,6 +943,17 @@ static void wsTaskWorker(void *pv)
   }
 }
 
+// ==========================================================
+// WORKFLOW EXPLANATION: DATA TRAVEL PIPELINE - STEP 5 (Actual Internet Transmission)
+// How data is sent to the internet:
+// 1. This uploadTask runs continuously in the background on Core 0.
+// 2. It waits for data to appear in the s_uploadQueue.
+// 3. When it gets a block, it formats it into a large JSON string via buildJsonBuffer().
+// 4. It then tries to send the JSON via WebSocket (if connected) for fastest streaming.
+// 5. If WebSocket is down, it falls back to a raw TLS HTTP POST request.
+// To change main things: You can change the JSON format in buildJsonBuffer(), or change
+// the API endpoints at the top of the file/in config.h.
+// ==========================================================
 static void uploadTask(void *pv)
 {
   static char *s_jsonBuf = nullptr;

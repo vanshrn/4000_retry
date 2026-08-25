@@ -18,3 +18,5 @@ void buzzer_wifiDisconnected();
 void buzzer_bleConnected();
 void buzzer_bleDisconnected();
 void buzzer_thermalShutdown();
+void start_thermal_warning();
+void buzzer_update();

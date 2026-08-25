@@ -55,11 +55,26 @@ void ledStatus_update() {
     bool bleConn  = s_bleConnected  || ble_isConnected();
 
     // Inbuilt LED (GPIO 21) Behavior:
-    // Solid ON (LOW) ONLY when WiFi OR Bluetooth is connected.
-    // Solid OFF (HIGH) when nothing is connected (ideal/standby state) or powered down.
-    if (wifiConn || bleConn) {
-        digitalWrite(LED_PIN, LOW);  // Active-LOW: LOW = ON (Inbuilt LED turns ON when connected)
-    } else {
-        digitalWrite(LED_PIN, HIGH); // Active-LOW: HIGH = OFF (Inbuilt LED turns OFF when disconnected)
+    // Solid ON (LOW) when WiFi is connected.
+    // Blinking (every 500ms) when only Bluetooth is connected.
+    // Solid OFF (HIGH) when nothing is connected or powered down.
+    
+    static uint32_t lastBlinkMs = 0;
+    static bool blinkState = false;
+    uint32_t now = millis();
+
+    if (wifiConn) {
+        digitalWrite(LED_PIN, LOW); // Active-LOW: LOW = ON (Solid for WiFi)
+    } 
+    else if (bleConn) {
+        // Blink every 500ms for BLE
+        if (now - lastBlinkMs >= 500) {
+            lastBlinkMs = now;
+            blinkState = !blinkState;
+            digitalWrite(LED_PIN, blinkState ? LOW : HIGH);
+        }
+    } 
+    else {
+        digitalWrite(LED_PIN, HIGH); // Active-LOW: HIGH = OFF
     }
 }

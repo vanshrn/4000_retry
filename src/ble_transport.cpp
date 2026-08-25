@@ -209,6 +209,18 @@ void ble_sendStatus(const String& json) {
     }
 }
 
+// ==========================================================
+// WORKFLOW EXPLANATION: DATA TRAVEL PIPELINE - STEP 5 (BLE Transmission)
+// How data is sent to the mobile app:
+// 1. Like network_uploadBlock, this function receives the fully processed block.
+// 2. Instead of a queue, it packs the raw data, filtered data, and metrics into 
+//    a binary packet (BleRawPacket).
+// 3. It then pushes this packet to connected BLE clients via pEcgChar->notify().
+// 4. If the packet is larger than the negotiated MTU (Maximum Transmission Unit), 
+//    it chunks the packet and sends the chunks sequentially.
+// To change main things: You can change the BleRawPacket struct definition at the top 
+// of this file to add or remove fields sent to the app.
+// ==========================================================
 void ble_uploadBlock(const Block& blk, bool leadsOff, bool loPlus, bool loMinus,
                      const char* warning, const char* severity,
                      const int32_t* dspData,

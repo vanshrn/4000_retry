@@ -229,18 +229,24 @@ void IMUDriver::update() {
     if (_dieTempC >= DIE_TEMP_CRIT_C) {
         system_thermalShutdown(_dieTempC);
     } else if (_dieTempC >= DIE_TEMP_WARN_C) {
-        static uint32_t lastWarnMs = 0;
-        if (now - lastWarnMs >= 10000) {
-            lastWarnMs = now;
+        static uint32_t lastWarnLogMs = 0;
+        static uint32_t lastBuzzMs = 0;
+        
+        // Keep serial/BLE logs at every 10 seconds to avoid spamming the connection
+        if (now - lastWarnLogMs >= 10000) {
+            lastWarnLogMs = now;
             Serial.printf("[IMU] DIE_TEMP WARNING: %.1fC exceeds DIE_TEMP_WARN_C (%.1fC)\n", _dieTempC, DIE_TEMP_WARN_C);
-            // Sound thermal warning tone
-            buzzer_on(2800);
-            delay(150);
-            buzzer_off();
+
             if (ble_isConnected()) {
                 String warnJson = "{\"dieTempC\":" + String(_dieTempC, 1) + ",\"status\":\"thermal_warning\",\"warning\":\"THERMAL_WARNING\"}";
                 ble_sendStatus(warnJson);
             }
+        }
+
+        // Trigger the buzzer continuously (every 1 second)
+        if (now - lastBuzzMs >= 1000) {
+            lastBuzzMs = now;
+            start_thermal_warning();
         }
     }
 
