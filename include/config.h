@@ -125,7 +125,7 @@
 // ==========================================================
 // Database / API
 // ==========================================================
-#define API_HOST                     "ads1292r-code.onrender.com"
+#define API_HOST                     "ads1292r-code-91eg.onrender.com"
 #define API_ENDPOINT                 "/api/ecg"
 #define API_DEVICE_ID                "ESP_ECG_123"
 #define API_USER_ID                  "ESP_ECG_123"
