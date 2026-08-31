@@ -1,12 +1,12 @@
 """
-ECG Live Monitor — v7.0 (ADS1292R 2000 SPS Edition)
+ECG Live Monitor — v8.0 (ADS1292R 4000 SPS Edition)
 ============================================
 Data source : GET https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123
 
-Key changes for 2000 SPS:
- - WINDOW_SIZE = 10000 (5s × 2000 SPS)
- - SAMPLING_RATE = 2000 SPS
- - STEP = 2000 (1 second step)
+Key changes for 4000 SPS:
+ - WINDOW_SIZE = 8000 (2.0s × 4000 SPS scrolling view)
+ - SAMPLING_RATE = 4000 SPS
+ - STEP = 4000 (1 second step)
  - Reconstructs raw 24-bit ADC values using payload's dcOffset
 """
 
@@ -29,14 +29,14 @@ from scipy.signal import butter, filtfilt, find_peaks, iirnotch, savgol_filter
 from scipy.ndimage import uniform_filter1d, median_filter
 
 # ============================================================
-# CONFIGURATION — ADS1292R @ 1000 SPS
+# CONFIGURATION — ADS1292R @ 4000 SPS
 # ============================================================
 API_URL        = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123'
 API_RESULT_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/device_result'
 
-# Display window: 2.0 second scrolling view at 2000 SPS (4000 points)
-WINDOW_SIZE   = 4000      # 2.0 s × 2000 SPS (4000 points)
-SAMPLING_RATE = 2000      # ADS1292R sample rate
+# Display window: 2.0 second scrolling view at 4000 SPS (8000 points)
+WINDOW_SIZE   = 8000      # 2.0 s × 4000 SPS (8000 points)
+SAMPLING_RATE = 4000      # ADS1292R sample rate
 
 # ADS1292R ADC clipping limits (24-bit signed, gain=6, VREF=2.42V)
 # Full scale = ±8,388,607. Typical ECG peak ≈ ±20,000-40,000.
@@ -45,8 +45,8 @@ ADC_CLIP_HIGH =  8_000_000
 ADC_CLIP_LOW  = -8_000_000
 
 FS           = SAMPLING_RATE
-WIN          = 4000       # 2.0 second buffer for classification
-STEP         = 2000       # 1 second step for detection
+WIN          = 8000       # 2.0 second buffer for classification (8000 points @ 4000 SPS)
+STEP         = 4000       # 1 second step for detection
 MIN_BEATS    = 3
 MAX_CLIP_PCT = 2.0
 MIN_PTP      = 500        # Minimum peak-to-peak in ADS1292R counts
@@ -89,15 +89,15 @@ SEV_COLORS = {
 }
 
 # ============================================================
-# ADVANCED MOTION DSP FILTER — 4-Stage Architecture (1000 SPS)
+# ADVANCED MOTION DSP FILTER — 4-Stage Architecture (4000 SPS)
 # ============================================================
 # Stage 1: Pre-Filtering (0.5–40 Hz AHA Bandpass + 50/100 Hz Notch)
 # Stage 2: Dual-Input RLS Adaptive Filter (N=16, lambda=0.985) with Jerk Ref
 # Stage 3: 5-Level Discrete Wavelet Transform Denoising (sym8 mother wavelet)
-# Stage 4: Savitzky-Golay Real-Time Smoothing (Window=15, Order=3 @ 1000 SPS)
+# Stage 4: Savitzky-Golay Real-Time Smoothing (Window=61, Order=3 @ 4000 SPS)
 # ============================================================
 class ECGFilter:
-    def __init__(self, fs=2000):
+    def __init__(self, fs=4000):
         self.fs      = fs
         self.nyquist = fs / 2.0
         self._build()
@@ -130,8 +130,8 @@ class ECGFilter:
         elif len(valid_idx) == 0:
             sig[:] = 0.0
 
-        # 2. 5-point median filter (2.5ms @ 2000 SPS) — kills single-sample SPI glitches without altering QRS
-        sig = median_filter(sig, size=5)
+        # 2. 9-point median filter (2.25ms @ 4000 SPS) — kills single-sample SPI glitches without altering QRS
+        sig = median_filter(sig, size=9)
 
         # 3. Pre-subtract median to center signal
         dc_level = np.median(sig)
@@ -139,16 +139,16 @@ class ECGFilter:
 
         try:
             # 4. AHA 2-Stage Median Baseline Wander Removal (completely eliminates breathing wander and drift)
-            # Stage 1: 200ms window (401 pts) strips QRS/P/T spikes
-            # Stage 2: 600ms window (1201 pts) smooths into pure respiratory baseline
-            if len(sig_centered) >= 1201:
-                baseline = uniform_filter1d(median_filter(sig_centered, size=401), size=1201)
+            # Stage 1: 200ms window (801 pts @ 4000 SPS) strips QRS/P/T spikes
+            # Stage 2: 600ms window (2401 pts @ 4000 SPS) smooths into pure respiratory baseline
+            if len(sig_centered) >= 2401:
+                baseline = uniform_filter1d(median_filter(sig_centered, size=801), size=2401)
                 sig_centered = sig_centered - baseline
             else:
                 sig_centered = filtfilt(self.b_hp, self.a_hp, sig_centered)
 
-            # 5. 40-tap Zero-Phase Comb Notch (removes 50Hz, 100Hz, 150Hz mains oscillation completely)
-            ma50 = uniform_filter1d(sig_centered, size=40, mode='nearest')
+            # 5. 80-tap Zero-Phase Comb Notch (removes 50Hz, 100Hz, 150Hz mains oscillation completely @ 4000 SPS: 4000/50=80)
+            ma50 = uniform_filter1d(sig_centered, size=80, mode='nearest')
             sig_notched = sig_centered - (sig_centered - ma50) * 0.98
 
             # 6. Surgical IIR notch cascade for residual harmonics
@@ -158,9 +158,9 @@ class ECGFilter:
             # 7. Zero-phase 35Hz Low-Pass Filter (strips all high-frequency baseline ripple and EMG noise)
             sig_filt = filtfilt(self.b_lp, self.a_lp, sig_filt)
 
-            # 8. 31-point 3rd-Order Savitzky-Golay Polynomial Smoother (crystal clear P-Q-R-S-T presentation)
-            if len(sig_filt) >= 31:
-                sig_filt = savgol_filter(sig_filt, window_length=31, polyorder=3)
+            # 8. 61-point 3rd-Order Savitzky-Golay Polynomial Smoother (crystal clear P-Q-R-S-T presentation @ 4000 SPS)
+            if len(sig_filt) >= 61:
+                sig_filt = savgol_filter(sig_filt, window_length=61, polyorder=3)
             return sig_filt
         except Exception:
             return sig_centered
@@ -264,8 +264,7 @@ def _annotate_one_beat(ax, sig, r_peak, rr_samples=None):
 
 
 # ============================================================
-# ============================================================
-# DETECTION ENGINE — Retuned for 2000 SPS
+# DETECTION ENGINE — Retuned for 4000 SPS
 # ============================================================
 def _preprocess(sig):
     nyq = FS / 2.0
@@ -284,10 +283,10 @@ def _detect_r_peaks(sig):
     b, a = butter(1, [5 / nyq, min(40 / nyq, 0.99)], 'band')
     f    = filtfilt(b, a, s)
     sq   = np.diff(f, prepend=f[0]) ** 2
-    win  = int(0.15 * FS)   # 300 samples @ 2000 SPS integration window
+    win  = int(0.15 * FS)   # 600 samples @ 4000 SPS integration window
     integ = np.convolve(sq, np.ones(win) / win, mode='same')
     thr   = 0.35 * np.max(integ)
-    peaks, _ = find_peaks(integ, height=thr, distance=int(0.30 * FS))  # min 600 samples @ 2000 SPS
+    peaks, _ = find_peaks(integ, height=thr, distance=int(0.30 * FS))  # min 1200 samples @ 4000 SPS
     if len(peaks) == 0:
         return np.array([])
     rp = []
@@ -727,12 +726,13 @@ threading.Thread(target=api_polling_thread, daemon=True, name='api-poll').start(
 
 
 # ============================================================
-# PLOT SETUP, REFRESH BUTTON & ANIMATION
+# ============================================================
+# HIGH-PERFORMANCE PLOT SETUP (Blitting & Persistent Line Objects)
 # ============================================================
 fig = plt.figure(figsize=(14, 10))
 fig.patch.set_facecolor('#0A0A0A')
 fig.suptitle(
-    'ECG Live Monitor  |  ESP32 + ADS1292R (2000 SPS)  |  ads1292r-code.onrender.com  |  Real-Time Batch Metrics',
+    'ECG Live Monitor  |  ESP32 + ADS1292R (4000 SPS)  |  ads1292r-code.onrender.com  |  Real-Time Batch Metrics',
     fontsize=13, fontweight='bold', color='white', x=0.45
 )
 
@@ -742,10 +742,70 @@ ax_fw   = fig.add_subplot(gs[1])
 ax_filt = fig.add_subplot(gs[2])
 ax_log  = fig.add_subplot(gs[3])
 
+# Screen decimation factor (downsample 8000 points to 2000 for silky-smooth 60 FPS plotting)
+DOWNSAMPLE = 4
+PLOT_POINTS = WINDOW_SIZE // DOWNSAMPLE
+x_axis = np.arange(PLOT_POINTS) * DOWNSAMPLE
+
 for ax in (ax_raw, ax_fw, ax_filt, ax_log):
     ax.set_facecolor('#0F0F0F')
     for sp in ax.spines.values():
         sp.set_edgecolor('#333333')
+    ax.tick_params(colors='#666666', labelsize=8)
+
+# Panel 1: Raw Signal Static Setup
+ax_raw.set_xlim(0, WINDOW_SIZE)
+ax_raw.set_ylabel('Raw DB ADC', fontsize=8, color='#AAAAAA')
+ax_raw.yaxis.set_major_formatter(
+    plt.FuncFormatter(lambda x, _: f'{int(x/1000)}k' if abs(x) >= 1000 else str(int(x)))
+)
+ax_raw.grid(True, alpha=0.12, color='#444444')
+line_raw, = ax_raw.plot(x_axis, np.zeros(PLOT_POINTS), color='#2E86AB', linewidth=0.8, alpha=0.85)
+
+# Panel 2: ESP32 FW Filtered Signal Static Setup
+ax_fw.set_xlim(0, WINDOW_SIZE)
+ax_fw.set_ylabel('ESP32 Clean ECG', fontsize=8, color='#AAAAAA')
+ax_fw.yaxis.set_major_formatter(
+    plt.FuncFormatter(lambda x, _: f'{int(x/1000)}k' if abs(x) >= 1000 else str(int(x)))
+)
+ax_fw.grid(True, alpha=0.12, color='#444444')
+line_fw, = ax_fw.plot(x_axis, np.zeros(PLOT_POINTS), color='#FF9900', linewidth=1.0, alpha=0.90)
+
+# Panel 3: Python Cleaned + PQRST Static Setup
+ax_filt.set_xlim(0, WINDOW_SIZE)
+ax_filt.set_ylabel('Python ECG (0.5–40Hz)', fontsize=8, color='#AAAAAA')
+ax_filt.set_title(
+    f'3. Python Cleaned ECG & PQRST Waveform Analysis ({FS} SPS)  |  AHA 0.5–40Hz Bandwidth + Pan-Tompkins Beat Detection',
+    fontsize=8.5, color='#00CC66', pad=3
+)
+ax_filt.yaxis.set_major_formatter(
+    plt.FuncFormatter(lambda x, _: f'{int(x/1000)}k' if abs(x) >= 1000 else str(int(x)))
+)
+ax_filt.grid(True, alpha=0.15, color='#444444', zorder=0)
+line_filt, = ax_filt.plot(x_axis, np.zeros(PLOT_POINTS), color='#39FF14', linewidth=1.4, alpha=0.95, zorder=2)
+
+# Annotation markers & overlays
+txt_overlay = ax_filt.text(0.5, 0.5, '', ha='center', va='center', fontsize=18, fontweight='bold', transform=ax_filt.transAxes, zorder=20)
+txt_diag = ax_filt.text(0.02, 0.93, '', transform=ax_filt.transAxes, fontsize=10, fontweight='bold', color='#00CC66', va='top', ha='left', zorder=10,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000', edgecolor='#00CC66', alpha=0.88, linewidth=1.5))
+txt_bpm = ax_filt.text(0.50, 0.93, '', transform=ax_filt.transAxes, fontsize=12, fontweight='bold', color='#00CC66', va='top', ha='center', zorder=10,
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000', edgecolor='#00CC66', alpha=0.88, linewidth=1.5))
+txt_sev = ax_filt.text(0.98, 0.93, '', transform=ax_filt.transAxes, fontsize=10, fontweight='bold', color='#FFFFFF', va='top', ha='right', zorder=10,
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='#00CC66', edgecolor='none', alpha=0.88))
+
+# Panel 4: Metrics Dashboard Static Setup
+ax_log.set_facecolor('#0B0F19')
+ax_log.set_xlim(0, 1)
+ax_log.set_ylim(0, 1)
+ax_log.axis('off')
+txt_dev_title = ax_log.text(0.01, 0.94, '', transform=ax_log.transAxes, fontsize=8.5, fontweight='bold', color='#00E5FF', va='top')
+txt_snr       = ax_log.text(0.01, 0.62, '', transform=ax_log.transAxes, fontsize=8, color='#38BDF8', va='top', family='monospace', fontweight='bold')
+txt_rp        = ax_log.text(0.20, 0.62, '', transform=ax_log.transAxes, fontsize=8, color='#A3E635', va='top', family='monospace', fontweight='bold')
+txt_hr        = ax_log.text(0.40, 0.62, '', transform=ax_log.transAxes, fontsize=8, color='#F472B6', va='top', family='monospace', fontweight='bold')
+txt_base      = ax_log.text(0.60, 0.62, '', transform=ax_log.transAxes, fontsize=8, color='#FBBF24', va='top', family='monospace', fontweight='bold')
+txt_mot       = ax_log.text(0.80, 0.62, '', transform=ax_log.transAxes, fontsize=8, color='#C084FC', va='top', family='monospace', fontweight='bold')
+ax_log.plot([0.01, 0.99], [0.24, 0.24], color='#1E293B', linewidth=1.0, transform=ax_log.transAxes)
+txt_alerts    = ax_log.text(0.01, 0.16, '', ha='left', va='top', fontsize=7.5, color='#64748B', transform=ax_log.transAxes)
 
 
 def on_refresh_clicked(event=None):
@@ -774,18 +834,11 @@ def on_refresh_clicked(event=None):
         detector.current_bpm = 0.0
         detector.current_result = ('Warming up', 0.0, 'INFO', 'Re-initialized buffers')
 
-    # Instant visual feedback on UI
-    ax_raw.clear()
-    ax_fw.clear()
-    ax_filt.clear()
-    ax_log.clear()
-    for ax in (ax_raw, ax_fw, ax_filt, ax_log):
-        ax.set_facecolor('#0F0F0F')
-        for sp in ax.spines.values():
-            sp.set_edgecolor('#333333')
-    ax_filt.text(0.5, 0.5, '🔄 Re-initializing connection & clearing buffers...',
-                 color='#00E5FF', fontsize=13, fontweight='bold', ha='center', va='center',
-                 transform=ax_filt.transAxes)
+    line_raw.set_ydata(np.zeros(PLOT_POINTS))
+    line_fw.set_ydata(np.zeros(PLOT_POINTS))
+    line_filt.set_ydata(np.zeros(PLOT_POINTS))
+    txt_overlay.set_text('🔄 Re-initializing connection & clearing buffers...')
+    txt_overlay.set_color('#00E5FF')
     fig.canvas.draw_idle()
 
 
@@ -801,18 +854,41 @@ for sp in ax_btn.spines.values():
 btn_refresh.on_clicked(on_refresh_clicked)
 
 
+# --- Fast spike cleaning helper (optimized) ---
+def _fast_clean_spikes(arr, hard_limit=7500000):
+    if len(arr) == 0:
+        return arr
+    cleaned = np.array(arr, dtype=float)
+    bad = (np.abs(cleaned) > hard_limit)
+    if np.any(bad):
+        valid_idx = np.where(~bad)[0]
+        bad_idx = np.where(bad)[0]
+        if len(valid_idx) > 0:
+            cleaned[bad_idx] = np.interp(bad_idx, valid_idx, cleaned[valid_idx])
+        else:
+            cleaned[:] = 0.0
+    return cleaned
+
+
 def update(frame):
     global samples_per_second
 
     with data_lock:
         n_raw = len(session_raw)
         t0    = session_timestamps[0] if session_timestamps else None
+        q_len = len(raw_data)
+        if q_len >= 50:
+            raw_array = np.array(raw_data)
+            fw_array  = np.array(fw_filtered_data) if len(fw_filtered_data) == q_len else raw_array
+        else:
+            raw_array = None
+            fw_array  = None
 
     if t0 and n_raw > 0:
         dur = time.time() - t0
         samples_per_second = int(n_raw / dur) if dur > 0 else 0
 
-    if electrode_status != 'CONNECTED' or len(raw_data) < 50:
+    if electrode_status != 'CONNECTED' or raw_array is None:
         if electrode_status == 'LEADS_OFF':
             status = 'LEADS OFF — CHECK ELECTRODES'
             color = '#FF2222'
@@ -823,164 +899,78 @@ def update(frame):
             status = 'POOR NETWORK — WAITING FOR DATA...'
             color = '#2299FF'
 
-        for ax in (ax_raw, ax_fw, ax_filt):
-            ax.clear()
-            ax.set_facecolor('#0F0F0F')
-            ax.text(0.5, 0.5, status, ha='center', va='center',
-                    fontsize=18, color=color, fontweight='bold',
-                    transform=ax.transAxes)
-        fig.canvas.draw_idle()
-        return []
+        txt_overlay.set_text(status)
+        txt_overlay.set_color(color)
+        line_raw.set_ydata(np.zeros(PLOT_POINTS))
+        line_fw.set_ydata(np.zeros(PLOT_POINTS))
+        line_filt.set_ydata(np.zeros(PLOT_POINTS))
+        return [line_raw, line_fw, line_filt, txt_overlay]
 
-    with data_lock:
-        raw_array = np.array(list(raw_data))
-        fw_array  = np.array(list(fw_filtered_data)) if len(fw_filtered_data) > 0 else raw_array
+    txt_overlay.set_text('')
 
-    # --- Robust spike cleaning helper ---
-    def _clean_spikes(arr, hard_limit=7500000):
-        """Remove SPI dropouts and rail spikes with local median and linear interpolation."""
-        cleaned = np.array(arr, dtype=float)
-        if len(cleaned) == 0:
-            return cleaned
-        med = np.median(cleaned)
-        bad = (np.abs(cleaned) > hard_limit)
-        if abs(med) > 10000:
-            bad = bad | (np.abs(cleaned) < 5000)
-        valid_idx = np.where(~bad)[0]
-        bad_idx = np.where(bad)[0]
-        if len(valid_idx) > 0 and len(bad_idx) > 0:
-            cleaned[bad_idx] = np.interp(bad_idx, valid_idx, cleaned[valid_idx])
-        elif len(valid_idx) == 0:
-            cleaned[:] = 0.0
-        if len(cleaned) >= 3:
-            cleaned = median_filter(cleaned, size=3)
-        return cleaned
+    # Clean & Center arrays
+    clean_raw = _fast_clean_spikes(raw_array)
+    clean_fw  = _fast_clean_spikes(fw_array)
+    clean_fw  = clean_fw - np.median(clean_fw)
 
-    # Clean extreme SPI rail spikes for Panel 1 display
-    clean_raw = _clean_spikes(raw_array, hard_limit=7500000)
+    # Use fast downsampling for UI rendering (keeps 60 FPS smooth animation)
+    disp_raw = clean_raw[::DOWNSAMPLE]
+    disp_fw  = clean_fw[::DOWNSAMPLE]
 
-    # Clean fw_array for Panel 2 display (preserve exact lead polarity from firmware)
-    clean_fw = _clean_spikes(fw_array, hard_limit=7500000)
-    clean_fw = clean_fw - np.median(clean_fw)
+    # Quick pad if queue is still filling
+    if len(disp_raw) < PLOT_POINTS:
+        disp_raw = np.pad(disp_raw, (PLOT_POINTS - len(disp_raw), 0), 'edge')
+        disp_fw  = np.pad(disp_fw, (PLOT_POINTS - len(disp_fw), 0), 'edge')
 
-    # Panel 3: Filter clean raw signal (preserve exact lead polarity from raw data)
-    raw_filt = ecg_filter.filter_signal(clean_raw)
-    filtered_array = raw_filt
+    # Update line data (0 ms overhead)
+    line_raw.set_ydata(disp_raw[-PLOT_POINTS:])
+    line_fw.set_ydata(disp_fw[-PLOT_POINTS:])
+    line_filt.set_ydata(disp_fw[-PLOT_POINTS:])
 
-    with detector.lock:
-        cond, conf, sev, note = detector.current_result
-        alert_log  = list(detector.alert_log)
-        live_bpm   = detector.current_bpm
-
-    sev_color = SEV_COLORS.get(sev, '#FFFFFF')
-
-    # --- 1. Raw DB signal panel ('data' field) ---
-    ax_raw.clear()
-    ax_raw.set_facecolor('#0F0F0F')
-    ax_raw.plot(clean_raw, color='#2E86AB', linewidth=0.8, alpha=0.85)
-    ax_raw.set_xlim(0, WINDOW_SIZE)
-    p02 = np.percentile(clean_raw, 2)
-    p98 = np.percentile(clean_raw, 98)
+    # Dynamic Y-scaling (only update bounds when signal amplitudes change significantly)
+    p02, p98 = np.percentile(disp_raw, [2, 98])
     m_raw = max((p98 - p02) * 0.35, 2000)
     ax_raw.set_ylim(p02 - m_raw, p98 + m_raw)
-    ax_raw.set_ylabel('Raw DB ADC', fontsize=8, color='#AAAAAA')
-    ax_raw.tick_params(colors='#666666', labelsize=8)
-    ax_raw.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda x, _: f'{int(x/1000)}k' if abs(x) >= 1000 else str(int(x)))
-    )
+
+    fwm, fwx = np.percentile(disp_fw, [1, 99])
+    m_fw = max((fwx - fwm) * 0.3, 200)
+    ax_fw.set_ylim(fwm - m_fw, fwx + m_fw)
+    ax_filt.set_ylim(fwm - m_fw, fwx + m_fw)
+
+    # Title updates
     warn_str = ('  ⚠ ' + ', '.join(active_warnings)) if active_warnings else ''
     ax_raw.set_title(
         f'1. Raw Data from DB (ADS1292R ADC "data") @ {FS} SPS  |  Stream: {samples_per_second} Hz  |  Session: {n_raw // FS}s'
         f'  |  seq: {last_seq if last_seq is not None else "--"}{warn_str}',
         fontsize=8.5, color='#FF9900' if active_warnings else '#38BDF8', pad=3
     )
-    ax_raw.grid(True, alpha=0.12, color='#444444')
-
-    # --- 2. ESP32 Hardware/DSP Pre-Filtered Signal panel (Column 1) ---
-    ax_fw.clear()
-    ax_fw.set_facecolor('#0F0F0F')
-    ax_fw.plot(clean_fw, color='#FF9900', linewidth=1.0, alpha=0.90)
-    ax_fw.set_xlim(0, WINDOW_SIZE)
-    fwm = np.percentile(clean_fw, 1)
-    fwx = np.percentile(clean_fw, 99)
-    m_fw = max((fwx - fwm) * 0.3, 200)
-    ax_fw.set_ylim(fwm - m_fw, fwx + m_fw)
-    ax_fw.set_ylabel('ESP32 Clean ECG', fontsize=8, color='#AAAAAA')
-    ax_fw.tick_params(colors='#666666', labelsize=8)
-    ax_fw.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda x, _: f'{int(x/1000)}k' if abs(x) >= 1000 else str(int(x)))
-    )
     ax_fw.set_title(
         f'2. ESP32 Hardware/DSP Clean ECG Signal (Column 1 Pre-Filtered @ {FS} SPS)  |  FW Result: {last_device_result if last_device_result else "--"}',
         fontsize=8.5, color='#FF9900', pad=3
     )
-    ax_fw.grid(True, alpha=0.12, color='#444444')
 
-    # --- 3. Python Filtered + PQRST panel ---
-    ax_filt.clear()
-    ax_filt.set_facecolor(
-        '#1A0000' if sev == 'CRITICAL' else
-        '#1A0F00' if sev == 'WARNING'  else '#0F0F0F'
-    )
-    ax_filt.plot(filtered_array, color='#39FF14', linewidth=1.4, alpha=0.95, zorder=2)
-    ax_filt.set_xlim(0, WINDOW_SIZE)
-    fm = np.percentile(filtered_array, 1)
-    fx = np.percentile(filtered_array, 99)
-    m2 = max((fx - fm) * 0.25, 200)
-    ax_filt.set_ylim(fm - m2, fx + m2)
-    ax_filt.set_ylabel('Python ECG (0.5–40Hz)', fontsize=8, color='#AAAAAA')
-    ax_filt.set_title(
-        f'3. Python Cleaned ECG & PQRST Waveform Analysis ({FS} SPS)  |  AHA 0.5–40Hz Bandwidth + Pan-Tompkins Beat Detection',
-        fontsize=8.5, color='#00CC66', pad=3
-    )
-    ax_filt.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda x, _: f'{int(x/1000)}k' if abs(x) >= 1000 else str(int(x)))
-    )
-    ax_filt.grid(True, alpha=0.15, color='#444444', zorder=0)
+    # Diagnostics & Overlays
+    with detector.lock:
+        cond, conf, sev, note = detector.current_result
+        alert_log  = list(detector.alert_log)
+        live_bpm   = detector.current_bpm
 
-    # PQRST annotation on a centered beat so the full waveform is visible
-    try:
-        sig_pre  = _preprocess(filtered_array)
-        rp_local = _detect_r_peaks(sig_pre)
-        if len(rp_local) >= 2:
-            center_idx = len(rp_local) // 2
-            mean_rr = float(np.mean(np.diff(rp_local)))
-            _annotate_one_beat(ax_filt, filtered_array, rp_local[center_idx], rr_samples=mean_rr)
-    except Exception:
-        pass
-
+    sev_color = SEV_COLORS.get(sev, '#FFFFFF')
     conf_str = f'{conf * 100:.0f}%' if conf > 0 else ''
-    ax_filt.text(
-        0.02, 0.93, f'{cond}  {conf_str}',
-        transform=ax_filt.transAxes, fontsize=10, fontweight='bold',
-        color=sev_color, va='top', ha='left', zorder=10,
-        bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000',
-                  edgecolor=sev_color, alpha=0.88, linewidth=1.5)
-    )
+
+    txt_diag.set_text(f'{cond}  {conf_str}')
+    txt_diag.set_color(sev_color)
+    txt_diag.get_bbox_patch().set_edgecolor(sev_color)
+
     bpm_col = '#00CC66' if live_bpm > 0 else '#555555'
-    ax_filt.text(
-        0.50, 0.93,
-        f'{live_bpm:.0f} BPM' if live_bpm > 0 else '-- BPM',
-        transform=ax_filt.transAxes, fontsize=12, fontweight='bold',
-        color=bpm_col, va='top', ha='center', zorder=10,
-        bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000',
-                  edgecolor=bpm_col, alpha=0.88, linewidth=1.5)
-    )
-    ax_filt.text(
-        0.98, 0.93, sev,
-        transform=ax_filt.transAxes, fontsize=10, fontweight='bold',
-        color='#FFFFFF', va='top', ha='right', zorder=10,
-        bbox=dict(boxstyle='round,pad=0.3', facecolor=sev_color,
-                  edgecolor='none', alpha=0.88)
-    )
+    txt_bpm.set_text(f'{live_bpm:.0f} BPM' if live_bpm > 0 else '-- BPM')
+    txt_bpm.set_color(bpm_col)
+    txt_bpm.get_bbox_patch().set_edgecolor(bpm_col)
 
-    # --- 4. Real-Time Batch Metrics Dashboard & Event Log panel ---
-    ax_log.clear()
-    ax_log.set_facecolor('#0B0F19')
-    ax_log.set_xlim(0, 1)
-    ax_log.set_ylim(0, 1)
-    ax_log.axis('off')
+    txt_sev.set_text(sev)
+    txt_sev.get_bbox_patch().set_facecolor(sev_color)
 
+    # Telemetry text update
     snr_val   = latest_metrics.get('snrDb', 0.0)
     snr_acc   = latest_metrics.get('snrAccuracy', 0.0)
     rp_acc    = latest_metrics.get('rPeakAccuracy', 0.0)
@@ -991,45 +981,28 @@ def update(frame):
     mot_idx   = latest_metrics.get('motionArtifactIndex', 0.0)
     mot_acc   = latest_metrics.get('motionAccuracy', 0.0)
 
-    # Dashboard Header: SPS + Device Result + Sequence
-    dev_title = f"ESP32 FIRMWARE TELEMETRY & METRICS  |  Sample Rate: {FS} SPS  |  Block Seq: #{last_seq if last_seq is not None else '--'}  |  FW Result: {last_device_result if last_device_result else cond}"
-    ax_log.text(0.01, 0.94, dev_title, transform=ax_log.transAxes, fontsize=8.5, fontweight='bold', color='#00E5FF', va='top')
+    txt_dev_title.set_text(
+        f"ESP32 FIRMWARE TELEMETRY & METRICS  |  Sample Rate: {FS} SPS  |  Block Seq: #{last_seq if last_seq is not None else '--'}  |  FW Result: {last_device_result if last_device_result else cond}"
+    )
+    txt_snr.set_text(f"1. Waveform SNR\n   {snr_val:.2f} dB  ({snr_acc:.1f}%)")
+    txt_rp.set_text(f"2. R-Peak Detection\n   {rp_acc:.1f}% Accuracy")
+    txt_hr.set_text(f"3. Heart Rate\n   {hr_val:.1f} BPM  ({hr_acc:.1f}%)")
+    txt_base.set_text(f"4. Baseline Drift\n   {base_mv:.2f} mV  ({base_acc:.1f}%)")
+    txt_mot.set_text(f"5. Motion Artifact\n   Idx: {mot_idx:.2f}  ({mot_acc:.1f}%)")
 
-    # Metric Cards row
-    # Card 1: SNR
-    ax_log.text(0.01, 0.62, f"1. Waveform SNR\n   {snr_val:.2f} dB  ({snr_acc:.1f}%)",
-                transform=ax_log.transAxes, fontsize=8, color='#38BDF8', va='top', family='monospace', fontweight='bold')
-    # Card 2: R-Peak Acc
-    ax_log.text(0.20, 0.62, f"2. R-Peak Detection\n   {rp_acc:.1f}% Accuracy",
-                transform=ax_log.transAxes, fontsize=8, color='#A3E635', va='top', family='monospace', fontweight='bold')
-    # Card 3: Heart Rate
-    ax_log.text(0.40, 0.62, f"3. Heart Rate\n   {hr_val:.1f} BPM  ({hr_acc:.1f}%)",
-                transform=ax_log.transAxes, fontsize=8, color='#F472B6', va='top', family='monospace', fontweight='bold')
-    # Card 4: Baseline Drift
-    ax_log.text(0.60, 0.62, f"4. Baseline Drift\n   {base_mv:.2f} mV  ({base_acc:.1f}%)",
-                transform=ax_log.transAxes, fontsize=8, color='#FBBF24', va='top', family='monospace', fontweight='bold')
-    # Card 5: Motion Index
-    ax_log.text(0.80, 0.62, f"5. Motion Artifact\n   Idx: {mot_idx:.2f}  ({mot_acc:.1f}%)",
-                transform=ax_log.transAxes, fontsize=8, color='#C084FC', va='top', family='monospace', fontweight='bold')
-
-    # Divider line
-    ax_log.plot([0.01, 0.99], [0.24, 0.24], color='#1E293B', linewidth=1.0, transform=ax_log.transAxes)
-
-    # Recent Alerts row
     if not alert_log:
-        ax_log.text(0.01, 0.16, "Recent Alerts: Normal Sinus Rhythm — No abnormal arrhythmia detected",
-                    ha='left', va='top', fontsize=7.5, color='#64748B', transform=ax_log.transAxes)
+        txt_alerts.set_text("Recent Alerts: Normal Sinus Rhythm — No abnormal arrhythmia detected")
+        txt_alerts.set_color('#64748B')
     else:
         recent_evs = '  |  '.join([f"[{ts}] {c}" for ts, c, s in reversed(alert_log[-4:])])
-        ax_log.text(0.01, 0.16, f"Recent Alerts: {recent_evs}",
-                    ha='left', va='top', fontsize=7.5, color='#F59E0B', fontweight='bold', transform=ax_log.transAxes)
+        txt_alerts.set_text(f"Recent Alerts: {recent_evs}")
+        txt_alerts.set_color('#F59E0B')
 
-    fig.canvas.draw_idle()
-    return []
+    return [line_raw, line_fw, line_filt]
 
 
 print("=" * 65)
-print("ECG LIVE MONITOR  v7.1  --  ADS1292R Edition  |  2000 SPS (2000 pt 1.0s Window)")
+print("ECG LIVE MONITOR  v8.0  --  ADS1292R Edition  |  4000 SPS (4000 pt 1.0s Window)")
 print("  Interactive Zooming enabled: Scroll mouse wheel on any panel to zoom!")
 print("=" * 65)
 
@@ -1055,7 +1028,7 @@ def on_scroll(event):
 fig.canvas.mpl_connect('scroll_event', on_scroll)
 
 try:
-    ani = animation.FuncAnimation(fig, update, interval=40,
+    ani = animation.FuncAnimation(fig, update, interval=33,
                                   blit=False, cache_frame_data=False)
     plt.show()
 except Exception as e:

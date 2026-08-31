@@ -15,8 +15,8 @@
  *  - STA auto-reconnects every 5s when disconnected.
  *  - If STA is down for >15s the AP is guaranteed active.
  *
- * Database: POSTs 2000-sample blocks to ads1292r-code.onrender.com
- *  via a FreeRTOS queue on Core 0 so the 2000-SPS loop is never
+ * Database: POSTs 4000-sample blocks to ads1292r-code.onrender.com
+ *  via a FreeRTOS queue on Core 0 so the 4000-SPS loop is never
  *  blocked by network latency.
  *
  * Buzzer: REMOVED (not connected in current circuit).
@@ -63,7 +63,7 @@ static MotionCalibration g_motionCalibration;
 // ==========================================================
 // Ping-Pong Buffers — allocated from PSRAM in setup().
 // Pointers live in internal BSS (tiny); arrays live in 8MB PSRAM.
-// 2×2000×4 = 16 KB raw  +  2×2000×1 = 4 KB mask  →  20 KB PSRAM.
+// 2×4000×4 = 32 KB raw  +  2×4000×1 = 8 KB mask  →  40 KB PSRAM.
 // ==========================================================
 static int32_t (*g_buffers)[WINDOW_SIZE] =
     nullptr; // PSRAM: ch2 ECG raw samples
@@ -94,7 +94,7 @@ static uint32_t g_leadOffEvents = 0;
 #define ANALYSIS_WINDOW_SIZE 625
 #endif
 // Analysis ring buffer — allocated from PSRAM in setup().
-// 10000×4 = 40 KB → too large for internal DRAM.
+// 20000×4 = 80 KB → too large for internal DRAM.
 static int32_t *g_analysisWindow = nullptr; // PSRAM: 5-second ECG ring buffer
 static uint32_t g_analysisWriteIndex = 0;
 static uint32_t g_analysisSampleCount = 0;
@@ -221,12 +221,12 @@ static void printWiringChecklist()
 // ==========================================================
 // WORKFLOW EXPLANATION: DATA TRAVEL PIPELINE - STEP 1 (Data Collection)
 // How data travels:
-// 1. The main loop() calls ads.readECGSample() at 2000 times per second (SPS).
+// 1. The main loop() calls ads.readECGSample() at 4000 times per second (SPS).
 // 2. The raw sample is immediately passed to this pushSample() function.
 // 3. This function stores the sample into a "ping-pong" buffer (g_buffers).
 //    A ping-pong buffer means there are two arrays. While one is being filled, 
 //    the other is being processed, ensuring we never miss a sample.
-// 4. Once a buffer fills up (reaches WINDOW_SIZE, e.g., 2000 samples), 
+// 4. Once a buffer fills up (reaches WINDOW_SIZE, e.g., 4000 samples), 
 //    it signals the DSP task (s_dspTaskHandle) to start processing it.
 // To change main things (e.g., WINDOW_SIZE): Check types.h or config.h
 // ==========================================================
@@ -473,7 +473,7 @@ static void processBlock()
   g_motionCalibration.applyMotionNoiseReduction(
       blk.filtered_data, blk.sampleValid, WINDOW_SIZE, seq);
 
-  // 5. Perform Peak Detection & Heart Rate calculation on this 2000-sample
+  // 5. Perform Peak Detection & Heart Rate calculation on this 4000-sample
   // block
   int pPeaks[32];
   float maxAbs = 0.0f;
@@ -553,11 +553,11 @@ void setup()
 {
   // -------------------------------------------------------
   // Allocate large ping-pong + analysis buffers from PSRAM.
-  // Internal DRAM cannot fit them at 2000 SPS.
-  //   g_buffers[2][2000]   = 16 KB
-  //   g_motionMask[2][2000] =  4 KB
-  //   g_analysisWindow[10000] = 40 KB
-  //   Total: 60 KB moved to 8 MB PSRAM
+  // Internal DRAM cannot fit them at 4000 SPS.
+  //   g_buffers[2][4000]   = 32 KB
+  //   g_motionMask[2][4000] =  8 KB
+  //   g_analysisWindow[20000] = 80 KB
+  //   Total: 120 KB moved to 8 MB PSRAM
   // -------------------------------------------------------
   g_buffers =
       (int32_t (*)[WINDOW_SIZE])ps_malloc(2 * WINDOW_SIZE * sizeof(int32_t));
@@ -667,7 +667,7 @@ void loop()
 
   // Block processing is handled asynchronously by dspTask (Core 1, 32KB stack)
 
-  // Throttle non-ADC tasks to 50 Hz (every 20ms) so they never starve the 2000
+  // Throttle non-ADC tasks to 50 Hz (every 20ms) so they never starve the 4000
   // SPS DRDY loop!
   static uint32_t s_lastMaintMs = 0;
   uint32_t now = millis();

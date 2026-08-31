@@ -394,7 +394,7 @@ ECGSample ADS1292R::readECGSample() {
         return s;
     }
 
-    // Poll DRDY with microsecond timeout (tight spin for zero-latency capture at 2000 SPS)
+    // Poll DRDY with microsecond timeout (tight spin for zero-latency capture at 4000 SPS)
     uint32_t t0 = micros();
     while (!isDataReady()) {
         if ((micros() - t0) > (ADS1292_DRDY_TIMEOUT_MS * 1000UL)) {

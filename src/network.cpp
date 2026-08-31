@@ -1,7 +1,7 @@
 /**
  * network.cpp
  * -----------------------------------------------------------
- * WiFi AP+STA manager + HTTP upload queue (ADS1292R Edition @ 2000 SPS)
+ * WiFi AP+STA manager + HTTP upload queue (ADS1292R Edition @ 4000 SPS)
  *
  * WiFi Behaviour:
  *  - On boot: loads saved credentials from NVS (Preferences).
@@ -18,12 +18,12 @@
  *   "userId":   "ESP_ECG_123",
  *   "deviceId": "ESP_ECG_123",
  *   "seq":      <uint32>,
- *   "sr":       2000,
+ *   "sr":       4000,
  *   "lo":       false,
  *   "loPlus":   false,
  *   "loMinus":  false,
- *   "data":     [[raw0, filt0], ...]   // 2000 full-scale ADS1292R sample pairs
- * @ 2000 SPS
+ *   "data":     [[raw0, filt0], ...]   // 4000 full-scale ADS1292R sample pairs
+ * @ 4000 SPS
  * }
  *
  * POST endpoint: https://ads1292r-code-91eg.onrender.com/api/ecg
@@ -44,12 +44,14 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WebServer.h>
+#define DEBUG_WEBSOCKETS(...) Serial.printf( __VA_ARGS__ )
 #include <WebSocketsClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <esp_wifi.h>
+#include "esp_heap_caps.h"
 #define JSON_BUF_SIZE \
-  (128 * 1024) // 128 KB — allocated in PSRAM for 4000 sample 2D payload
+  (256 * 1024) // 256 KB — allocated in PSRAM for 8000 sample 2D payload (4000 SPS)
 #define NUM_UPLOAD_WORKERS 3
 #include <inttypes.h> // PRId32 format specifier for int32_t in snprintf
 
@@ -864,6 +866,7 @@ static void localStatusTask(void *pv)
 // -----------------------------------------------------------
 static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 {
+  Serial.printf("[WS DEBUG] Event Type: %d, length: %u\n", type, length);
   switch (type)
   {
   case WStype_DISCONNECTED:
@@ -874,19 +877,41 @@ static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
       Serial.println(F("[WS] Disconnected from WebSocket server. HTTP POST "
                        "fallback active..."));
     }
+    if (payload && length > 0) {
+      Serial.printf("[WS] Disconnect payload: %s\n", (const char *)payload);
+    }
     break;
   case WStype_CONNECTED:
     s_wsConnected = true;
     Serial.printf("[WS] Connected to WebSocket endpoint at wss://%s/ws!\n",
                   API_HOST);
+    if (payload && length > 0) {
+      Serial.printf("[WS] Connect payload/url: %s\n", (const char *)payload);
+    }
     break;
   case WStype_TEXT:
-    Serial.printf("[WS] Server msg: %s\n", (const char *)payload);
+    Serial.printf("[WS] Server msg (TEXT): %s\n", (const char *)payload);
+    break;
+  case WStype_BIN:
+    Serial.printf("[WS] Server msg (BIN), length: %u\n", length);
     break;
   case WStype_ERROR:
     s_wsConnected = false;
+    Serial.printf("[WS] ERROR! ");
+    if (payload && length > 0) {
+      Serial.printf("Details: %s\n", (const char *)payload);
+    } else {
+      Serial.println("No error details provided.");
+    }
+    break;
+  case WStype_PING:
+    Serial.printf("[WS] PING received, length: %u\n", length);
+    break;
+  case WStype_PONG:
+    Serial.printf("[WS] PONG received, length: %u\n", length);
     break;
   default:
+    Serial.printf("[WS] Unhandled event type: %d\n", type);
     break;
   }
 }
@@ -902,8 +927,8 @@ static void wsTaskWorker(void *pv)
 
     if (wifiOk)
     {
-      // If Wi-Fi just came UP or WebSocket is disconnected for > 5 seconds, actively re-initiate
-      if (!wasWifiConnected || (!s_wsConnected && (millis() - lastInitMs >= 5000)))
+      // If Wi-Fi just came UP or WebSocket is disconnected for > 12 seconds, attempt re-initiate
+      if (!wasWifiConnected || (!s_wsConnected && (millis() - lastInitMs >= 12000)))
       {
         lastInitMs = millis();
         if (s_wsMutex && xSemaphoreTake(s_wsMutex, pdMS_TO_TICKS(50)) == pdTRUE)
@@ -911,9 +936,14 @@ static void wsTaskWorker(void *pv)
           s_webSocket.disconnect();
           s_webSocket.beginSSL(API_HOST, 443, "/ws", "", "");
           s_webSocket.onEvent(webSocketEvent);
-          s_webSocket.setReconnectInterval(1000);
-          s_webSocket.enableHeartbeat(10000, 3000, 2);
+          s_webSocket.setReconnectInterval(5000);
+          s_webSocket.enableHeartbeat(15000, 4000, 2);
           xSemaphoreGive(s_wsMutex);
+          Serial.printf("[WS-Client] connect wss...\n");
+          Serial.printf("Internal free: %u (largest block %u), PSRAM free: %u\n",
+                        (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                        (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                        (uint32_t)ESP.getFreePsram());
           Serial.printf("[WS] Connecting to wss://%s/ws...\n", API_HOST);
         }
       }
@@ -1008,14 +1038,25 @@ static void uploadTask(void *pv)
                             (unsigned)p->seq, (unsigned)elapsed, (unsigned)len,
                             (unsigned)remaining, UPLOAD_QUEUE_DEPTH);
             }
+            else
+            {
+              Serial.printf("[WS DEBUG] sendTXT failed for seq=%u, length=%u bytes\n",
+                            (unsigned)p->seq, (unsigned)len);
+            }
           }
 
           if (!sentViaWs)
           {
+            uint32_t t_post_start = millis();
             bool ok = postPayload(s_jsonBuf, len);
             if (!ok)
             {
-              Serial.printf("[NET QUEUE] POST failed for seq=%u.\n", p->seq);
+              uint32_t t_post_elapsed = millis() - t_post_start;
+              Serial.printf("[NET QUEUE ERROR] HTTP POST totally failed for seq=%u after %u ms.\n", p->seq, t_post_elapsed);
+              Serial.printf("                    (Payload size: %u bytes, Total Heap: %u, Internal Heap: %u)\n",
+                            (unsigned)len,
+                            (uint32_t)ESP.getFreeHeap(),
+                            (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             }
           }
         }
@@ -1179,6 +1220,7 @@ static size_t buildJsonBuffer(const UploadPayload &p, char *buf,
 static WiFiClientSecure s_tlsClient;
 static bool s_httpConnected = false;
 static uint32_t s_lastConnectMs = 0;
+static uint32_t s_lastTlsFailMs = 0;
 
 static void closeHttpConnection()
 {
@@ -1192,19 +1234,34 @@ static void closeHttpConnection()
 
 static bool openHttpConnection()
 {
+  // Enforce at least 3s backoff after a failed TLS connect to prevent thrashing
+  if (s_lastTlsFailMs > 0 && (millis() - s_lastTlsFailMs < 3000))
+  {
+    return false;
+  }
+
   closeHttpConnection();
   s_tlsClient.setInsecure();
-  s_tlsClient.setNoDelay(
-      true);                 // Disable Nagle's algorithm for zero packet delay
-  s_tlsClient.setTimeout(3); // 3 seconds max timeout for live streaming
+  s_tlsClient.setNoDelay(true); // Disable Nagle's algorithm for zero packet delay
+  s_tlsClient.setTimeout(4);     // 4 seconds max timeout
+
   Serial.printf("[NET] Connecting to %s:443...\n", API_HOST);
+  Serial.printf("Internal free: %u (largest block %u), PSRAM free: %u\n",
+                (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (uint32_t)ESP.getFreePsram());
+
   if (!s_tlsClient.connect(API_HOST, 443))
   {
-    Serial.println(F("[NET ERROR] TLS connect failed."));
+    char errBuf[128];
+    int errCode = s_tlsClient.lastError(errBuf, sizeof(errBuf));
+    Serial.printf("[NET ERROR] TLS connect failed! Error code: %d - %s\n", errCode, errBuf);
+    s_lastTlsFailMs = millis();
     return false;
   }
   s_httpConnected = true;
   s_lastConnectMs = millis();
+  s_lastTlsFailMs = 0;
   Serial.println(F("[NET] TLS socket open."));
   return true;
 }

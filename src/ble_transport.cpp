@@ -49,10 +49,10 @@ struct __attribute__((packed)) BleMetrics {
 
 struct __attribute__((packed)) BleRawPacket {
     uint32_t   seq;                              // 4 bytes [0..3]
-    uint16_t   sampleRate;                       // 2 bytes [4..5] (2000 Hz)
+    uint16_t   sampleRate;                       // 2 bytes [4..5] (4000 Hz)
     uint8_t    flags;                            // 1 byte  [6] (bit0=lo, bit1=loPlus, bit2=loMinus)
     uint8_t    severity;                         // 1 byte  [7] (0=INFO, 1=WARNING, 2=CRITICAL)
-    uint16_t   numSamples;                       // 2 bytes [8..9] (2000 samples)
+    uint16_t   numSamples;                       // 2 bytes [8..9] (4000 samples)
     char       deviceResult[MAX_RESULT_STR_LEN]; // 48 bytes [10..57]
     BleMetrics metrics;                          // 40 bytes [58..97]
     int32_t    raw_samples[WINDOW_SIZE];         // Raw ADC samples (8000 bytes)

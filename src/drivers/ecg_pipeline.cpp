@@ -141,7 +141,7 @@ float ECGPipeline::_medianOfFloats(float *tmp, int n) {
 
 // ==========================================================
 // -----------------------------------------------------------
-// Robust 1st-Order DC Blocker Filter (~0.48 Hz cutoff @ 2000 SPS)
+// Robust 1st-Order DC Blocker Filter (~0.48 Hz cutoff @ 4000 SPS)
 // -----------------------------------------------------------
 static float s_dc_x_prev = 0.0f;
 static float s_dc_y_prev = 0.0f;
@@ -153,7 +153,7 @@ void ECGPipeline::_removeBaselineWander(float *data, int len) {
     s_dc_y_prev = 0.0f;
     s_dc_init = true;
   }
-  const float R = 0.9985f; // ~0.48 Hz cutoff @ 2000 SPS (AHA clinical standard)
+  const float R = 0.99925f; // ~0.48 Hz cutoff @ 4000 SPS (AHA clinical standard)
   for (int i = 0; i < len; i++) {
     float x = data[i];
     float y = x - s_dc_x_prev + R * s_dc_y_prev;
@@ -220,7 +220,12 @@ static float s_fir_notch_prev[40];
 static bool s_fir_notch_has_prev = false;
 
 void ECGPipeline::_applyFIRNotch(float *data, int len) {
-  static float temp[WINDOW_SIZE];
+  static float *temp = nullptr;
+  if (!temp) {
+    temp = (float *)ps_malloc(sizeof(float) * WINDOW_SIZE);
+    if (!temp) temp = (float *)malloc(sizeof(float) * WINDOW_SIZE);
+  }
+  if (!temp) return;
   for (int i = 0; i < len; i++) {
     float ma50 = 0.0f;
     for (int k = -19; k <= 20; k++) {
@@ -245,12 +250,17 @@ void ECGPipeline::_applyFIRNotch(float *data, int len) {
   memcpy(data, temp, len * sizeof(float));
 }
 
-// Zero-Phase FIR Low-Pass (9-tap Gaussian @ 2000 SPS, ~60 Hz cutoff) with Inter-Block History
+// Zero-Phase FIR Low-Pass (9-tap Gaussian @ 4000 SPS, ~60 Hz cutoff) with Inter-Block History
 static float s_fir_lp_prev[10];
 static bool s_fir_lp_has_prev = false;
 
 void ECGPipeline::_applyFIRLowPass(float *data, int len) {
-  static float temp[WINDOW_SIZE];
+  static float *temp = nullptr;
+  if (!temp) {
+    temp = (float *)ps_malloc(sizeof(float) * WINDOW_SIZE);
+    if (!temp) temp = (float *)malloc(sizeof(float) * WINDOW_SIZE);
+  }
+  if (!temp) return;
   for (int i = 0; i < len; i++) {
     float sum = 0.0f;
     float weightSum = 0.0f;
@@ -282,7 +292,12 @@ static float s_savgol_prev[12];
 static bool s_savgol_has_prev = false;
 
 static void _applySavitzkyGolayFirmware(float *data, int len) {
-  static float temp[WINDOW_SIZE];
+  static float *temp = nullptr;
+  if (!temp) {
+    temp = (float *)ps_malloc(sizeof(float) * WINDOW_SIZE);
+    if (!temp) temp = (float *)malloc(sizeof(float) * WINDOW_SIZE);
+  }
+  if (!temp) return;
   static const float coeffs[11] = {-36.0f, 9.0f,  44.0f, 69.0f, 84.0f, 89.0f,
                                    84.0f,  69.0f, 44.0f, 9.0f,  -36.0f};
   for (int i = 0; i < len; i++) {
@@ -334,7 +349,7 @@ void ECGPipeline::processBlock(Block &blk) {
   // Step 4: Zero-Phase FIR 50 Hz & 100 Hz Comb Notch Filter (40-tap)
   _applyFIRNotch(_workBuf, WINDOW_SIZE);
 
-  // Step 5: Zero-Phase FIR Low-Pass (~60 Hz cutoff @ 2000 SPS)
+  // Step 5: Zero-Phase FIR Low-Pass (~60 Hz cutoff @ 4000 SPS)
   _applyFIRLowPass(_workBuf, WINDOW_SIZE);
 
   // Step 6: 11-point Savitzky-Golay Polynomial Smoother

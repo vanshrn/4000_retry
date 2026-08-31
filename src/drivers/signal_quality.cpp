@@ -20,7 +20,7 @@ PerformanceMetrics calculateBatchMetrics(
     }
     double rawMean = rawSum / (double)length;
 
-    // 2. Waveform SNR & Accuracy (24-bit ADC @ 2000 SPS)
+    // 2. Waveform SNR & Accuracy (24-bit ADC @ 4000 SPS)
     double signalPower = 0.0;
     double noisePower = 0.0;
     for (int i = 0; i < length; i++) {
@@ -80,7 +80,7 @@ PerformanceMetrics calculateBatchMetrics(
     int bgSampleCount = 0;
     for (int i = 1; i < length; i++) {
         double d = fabs((double)(cleanSignal[i] - cleanSignal[i - 1]));
-        if (d < 1500.0) { // Baseline samples (exclude steep QRS slope at 2000 SPS)
+        if (d < 750.0) { // Baseline samples (exclude steep QRS slope at 4000 SPS)
             bgDeltaSum += d;
             bgSampleCount++;
         }

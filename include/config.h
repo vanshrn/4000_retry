@@ -1,5 +1,5 @@
 /**
- * config.h  — Register values corrected for ADS1292R @ 2000 SPS
+ * config.h  — Register values corrected for ADS1292R @ 4000 SPS
  */
 
 #pragma once
@@ -17,7 +17,7 @@
 // ==========================================================
 // SPI
 // ==========================================================
-#define ADS1292_SPI_CLOCK_HZ         1000000UL  // 1 MHz
+#define ADS1292_SPI_CLOCK_HZ         2000000UL  // 2 MHz for 4000 SPS zero-latency timing
 #define ADS1292_SPI_BIT_ORDER        MSBFIRST
 #define ADS1292_SPI_MODE             SPI_MODE1   // CPOL=0, CPHA=1
 
@@ -29,18 +29,18 @@
 #define ADS1292_DRDY_TIMEOUT_MS      10    // 10ms timeout
 
 // ==========================================================
-// Sampling — 2000 SPS (CONFIG1 = 0x04)
-// ADS1292R DR[2:0] = 100 → 2000 SPS
+// Sampling — 4000 SPS (CONFIG1 = 0x05)
+// ADS1292R DR[2:0] = 101 → 4000 SPS
 // ==========================================================
-#define SAMPLE_RATE                  2000
-#define WINDOW_SIZE                  2000       // 1.0 second @ 2000 SPS (2000 points in 1 block, 1 POST every 1s)
-#define ANALYSIS_WINDOW_SIZE         10000      // 5 seconds @ 2000 SPS
+#define SAMPLE_RATE                  4000
+#define WINDOW_SIZE                  4000       // 1.0 second @ 4000 SPS (4000 points in 1 block, 1 POST every 1s)
+#define ANALYSIS_WINDOW_SIZE         20000      // 5 seconds @ 4000 SPS
 
 // ==========================================================
 // ADS1292R Register Values — EXACTLY from ProtoCentral library
 // (protocentralAds1292r.cpp ads1292Init)
 // ==========================================================
-#define ADS1292_CONFIG1_VAL          0x04          // 2000 SPS (DR[2:0] = 100)
+#define ADS1292_CONFIG1_VAL          0x05          // 4000 SPS (DR[2:0] = 101)
 #define ADS1292_CONFIG2_VAL          0b11100000    // 0xE0 — Lead-off comp POWERED UP (bit 6 = 1)
 #define ADS1292_LOFF_VAL             0b00010000    // 0x10 — Lead-off defaults (95%, 6nA)
 #define ADS1292_CH1SET_VAL           0b00000000    // 0x00 — Ch1 enabled, gain 6, electrode in
@@ -58,7 +58,7 @@
 // ==========================================================
 // Baseline Wander Removal (median-based)
 // ==========================================================
-#define BL_STAGE1_WIN                400        // 200ms chunk @ 2000 SPS
+#define BL_STAGE1_WIN                800        // 200ms chunk @ 4000 SPS
 #define BL_CANDS_PER_BLOCK           (WINDOW_SIZE / BL_STAGE1_WIN)
 #define BL_STAGE2_WIN                5          // Median of 5 chunks
 #define BL_HISTORY_LEN               16
@@ -71,7 +71,7 @@
 #define LP_MOVING_AVG_WIN            3
 
 // ==========================================================
-// Validation (ADS1292R 24-bit ADC @ 2000 SPS)
+// Validation (ADS1292R 24-bit ADC @ 4000 SPS)
 // ==========================================================
 #define VALIDATE_SPIKE_DELTA_MAX     500000     // 500k counts/sample
 #define VALIDATE_NOISE_RATIO_MAX     0.30f
@@ -79,8 +79,8 @@
 // ==========================================================
 // Calibration-Range-Based Motion Noise Reduction Config
 // ==========================================================
-#define CALIBRATION_WINDOW_SAMPLES   10000  // 5s @ 2000 SPS rolling stillness calibration
-#define CALIBRATION_MIN_SAMPLES      4000   // 2s @ 2000 SPS minimum stillness before active
+#define CALIBRATION_WINDOW_SAMPLES   20000  // 5s @ 4000 SPS rolling stillness calibration
+#define CALIBRATION_MIN_SAMPLES      8000   // 2s @ 4000 SPS minimum stillness before active
 #define CALIBRATION_STD_MULTIPLIER   3.0f   // Clamp bound
 #define MOTION_SMOOTHING_MIN_ALPHA   0.05f
 #define MOTION_SMOOTHING_MAX_ALPHA   0.65f
