@@ -95,6 +95,7 @@ static Preferences s_prefs;
 
 static WebSocketsClient s_webSocket;
 static volatile bool s_wsConnected = false;
+static volatile uint32_t s_lastWsConnectedMs = 0;
 static SemaphoreHandle_t s_wsMutex = nullptr;
 static uint32_t s_lastWsLogMs = 0;
 
@@ -883,6 +884,7 @@ static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
     break;
   case WStype_CONNECTED:
     s_wsConnected = true;
+    s_lastWsConnectedMs = millis();
     Serial.printf("[WS] Connected to WebSocket endpoint at wss://%s/ws!\n",
                   API_HOST);
     if (payload && length > 0) {
@@ -927,8 +929,8 @@ static void wsTaskWorker(void *pv)
 
     if (wifiOk)
     {
-      // If Wi-Fi just came UP or WebSocket is disconnected for > 12 seconds, attempt re-initiate
-      if (!wasWifiConnected || (!s_wsConnected && (millis() - lastInitMs >= 12000)))
+      // If Wi-Fi just came UP or WebSocket is disconnected for > 3 seconds, attempt fast reconnect
+      if (!wasWifiConnected || (!s_wsConnected && (millis() - lastInitMs >= 3000)))
       {
         lastInitMs = millis();
         if (s_wsMutex && xSemaphoreTake(s_wsMutex, pdMS_TO_TICKS(50)) == pdTRUE)
@@ -936,15 +938,10 @@ static void wsTaskWorker(void *pv)
           s_webSocket.disconnect();
           s_webSocket.beginSSL(API_HOST, 443, "/ws", "", "");
           s_webSocket.onEvent(webSocketEvent);
-          s_webSocket.setReconnectInterval(5000);
-          s_webSocket.enableHeartbeat(15000, 4000, 2);
+          s_webSocket.setReconnectInterval(2000);
+          s_webSocket.enableHeartbeat(10000, 3000, 2); // 10s ping keep-alive to prevent Render TCP timeouts
           xSemaphoreGive(s_wsMutex);
-          Serial.printf("[WS-Client] connect wss...\n");
-          Serial.printf("Internal free: %u (largest block %u), PSRAM free: %u\n",
-                        (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                        (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-                        (uint32_t)ESP.getFreePsram());
-          Serial.printf("[WS] Connecting to wss://%s/ws...\n", API_HOST);
+          Serial.printf("[WS-Client] Fast reconnect wss://%s/ws...\n", API_HOST);
         }
       }
       wasWifiConnected = true;
@@ -969,7 +966,7 @@ static void wsTaskWorker(void *pv)
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(1)); // 1ms delay for 5x faster TCP ACK/packet processing
   }
 }
 
@@ -1037,27 +1034,21 @@ static void uploadTask(void *pv)
                             "remaining: %u/%d\n",
                             (unsigned)p->seq, (unsigned)elapsed, (unsigned)len,
                             (unsigned)remaining, UPLOAD_QUEUE_DEPTH);
+              // Yield 10ms after a successful heavy 24KB transmission to allow TCP ACKs to clear smoothly
+              vTaskDelay(10 / portTICK_PERIOD_MS);
             }
             else
             {
               Serial.printf("[WS DEBUG] sendTXT failed for seq=%u, length=%u bytes\n",
                             (unsigned)p->seq, (unsigned)len);
+              // Yield briefly to let WebSocket worker re-establish TCP socket
+              vTaskDelay(50 / portTICK_PERIOD_MS);
             }
           }
-
-          if (!sentViaWs)
+          else
           {
-            uint32_t t_post_start = millis();
-            bool ok = postPayload(s_jsonBuf, len);
-            if (!ok)
-            {
-              uint32_t t_post_elapsed = millis() - t_post_start;
-              Serial.printf("[NET QUEUE ERROR] HTTP POST totally failed for seq=%u after %u ms.\n", p->seq, t_post_elapsed);
-              Serial.printf("                    (Payload size: %u bytes, Total Heap: %u, Internal Heap: %u)\n",
-                            (unsigned)len,
-                            (uint32_t)ESP.getFreeHeap(),
-                            (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-            }
+            // WebSocket is reconnecting — yield to give wsTaskWorker full Core 0 CPU time
+            vTaskDelay(50 / portTICK_PERIOD_MS);
           }
         }
       }
