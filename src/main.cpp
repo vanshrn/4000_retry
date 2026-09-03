@@ -96,6 +96,7 @@ static uint32_t g_leadOffEvents = 0;
 // Analysis ring buffer — allocated from PSRAM in setup().
 // 20000×4 = 80 KB → too large for internal DRAM.
 static int32_t *g_analysisWindow = nullptr; // PSRAM: 5-second ECG ring buffer
+static int32_t *g_scaledSnapshot = nullptr; // PSRAM: 5-second scaled classifier buffer
 static uint32_t g_analysisWriteIndex = 0;
 static uint32_t g_analysisSampleCount = 0;
 
@@ -308,8 +309,6 @@ static void processBlock()
   Block &blk = *blkPtr;
 
   memcpy(blk.data, g_buffers[doneBuffer], sizeof(int32_t) * WINDOW_SIZE);
-  if (pipeline)
-    pipeline->cleanRawSpikes(blk.data, WINDOW_SIZE);
   blk.seq = seq;
   blk.lo = lo;
   blk.loPlus = loPlus;
@@ -411,38 +410,21 @@ static void processBlock()
   String detail =
       String(g_analysisSampleCount / WINDOW_SIZE) + "/5 seconds collected";
 
-  if (g_analysisSampleCount >= ANALYSIS_WINDOW_SIZE)
+  if (g_analysisSampleCount >= ANALYSIS_WINDOW_SIZE && g_scaledSnapshot)
   {
-    // Scaled snapshot — 40 KB, allocated from PSRAM once.
-    static int32_t *s_scaledSnapshot = nullptr;
-    if (!s_scaledSnapshot)
+    uint32_t start = g_analysisWriteIndex;
+    for (int i = 0; i < ANALYSIS_WINDOW_SIZE; i++)
     {
-      s_scaledSnapshot =
-          (int32_t *)ps_malloc(sizeof(int32_t) * ANALYSIS_WINDOW_SIZE);
-      if (!s_scaledSnapshot)
-        s_scaledSnapshot =
-            (int32_t *)malloc(sizeof(int32_t) * ANALYSIS_WINDOW_SIZE);
+      int32_t val =
+          (g_analysisWindow[(start + i) % ANALYSIS_WINDOW_SIZE] >> 6) + 2048;
+      if (val > 4095)
+        val = 4095;
+      if (val < 0)
+        val = 0;
+      g_scaledSnapshot[i] = val;
     }
-    if (!s_scaledSnapshot)
-    {
-      Serial.println(F("[ERR] s_scaledSnapshot OOM!"));
-    }
-    else
-    {
-      uint32_t start = g_analysisWriteIndex;
-      for (int i = 0; i < ANALYSIS_WINDOW_SIZE; i++)
-      {
-        int32_t val =
-            (g_analysisWindow[(start + i) % ANALYSIS_WINDOW_SIZE] >> 6) + 2048;
-        if (val > 4095)
-          val = 4095;
-        if (val < 0)
-          val = 0;
-        s_scaledSnapshot[i] = val;
-      }
-      condition = classifyWindow(s_scaledSnapshot, ANALYSIS_WINDOW_SIZE,
-                                 severity, detail);
-    }
+    condition = classifyWindow(g_scaledSnapshot, ANALYSIS_WINDOW_SIZE,
+                               severity, detail);
   }
 
   if (severity == "CRITICAL" || severity == "WARNING")
@@ -564,8 +546,8 @@ void setup()
       (int32_t (*)[WINDOW_SIZE])ps_malloc(2 * WINDOW_SIZE * sizeof(int32_t));
   g_motionMask =
       (uint8_t (*)[WINDOW_SIZE])ps_malloc(2 * WINDOW_SIZE * sizeof(uint8_t));
-  g_analysisWindow =
-      (int32_t *)ps_malloc(ANALYSIS_WINDOW_SIZE * sizeof(int32_t));
+  g_analysisWindow = (int32_t *)ps_malloc(ANALYSIS_WINDOW_SIZE * sizeof(int32_t));
+  g_scaledSnapshot = (int32_t *)ps_malloc(ANALYSIS_WINDOW_SIZE * sizeof(int32_t));
   pipeline = (ECGPipeline *)ps_malloc(sizeof(ECGPipeline));
   if (!pipeline)
     pipeline = new ECGPipeline();
@@ -573,7 +555,7 @@ void setup()
   if (g_motionCalibration)
     new (g_motionCalibration) MotionCalibration();
 
-  if (!g_buffers || !g_motionMask || !g_analysisWindow || !pipeline || !g_motionCalibration)
+  if (!g_buffers || !g_motionMask || !g_analysisWindow || !g_scaledSnapshot || !pipeline || !g_motionCalibration)
   {
     Serial.println(F("[FATAL] PSRAM allocation failed! Halting."));
     while (true)
@@ -582,6 +564,7 @@ void setup()
   memset(g_buffers, 0, 2 * WINDOW_SIZE * sizeof(int32_t));
   memset(g_motionMask, 0, 2 * WINDOW_SIZE * sizeof(uint8_t));
   memset(g_analysisWindow, 0, ANALYSIS_WINDOW_SIZE * sizeof(int32_t));
+  memset(g_scaledSnapshot, 0, ANALYSIS_WINDOW_SIZE * sizeof(int32_t));
 
   ledStatus_init(); // Powers ON Red LED (active) & initializes Orange LED (OFF)
 

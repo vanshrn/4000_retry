@@ -176,7 +176,7 @@ int fastlz_decompress(const void* input, int length, void* output, int maxout) {
   const uint8_t* ip_limit = ip + length;
   uint8_t* op = (uint8_t*)output;
   uint8_t* op_limit = op + maxout;
-  uint32_t ctrl = (*ip++) & 31;
+  uint32_t ctrl = (*ip++);
 
   while (ip < ip_limit) {
     uint32_t len = ctrl >> 5;

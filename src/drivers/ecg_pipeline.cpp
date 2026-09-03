@@ -141,25 +141,39 @@ float ECGPipeline::_medianOfFloats(float *tmp, int n) {
 
 // ==========================================================
 // -----------------------------------------------------------
-// Robust 1st-Order DC Blocker Filter (~0.48 Hz cutoff @ 4000 SPS)
+// Robust DC Offset Removal + 0.5 Hz High-Pass Filter @ 4000 SPS
 // -----------------------------------------------------------
-static float s_dc_x_prev = 0.0f;
-static float s_dc_y_prev = 0.0f;
+static double s_dc_x_prev = 0.0;
+static double s_dc_y_prev = 0.0;
 static bool s_dc_init = false;
 
 void ECGPipeline::_removeBaselineWander(float *data, int len) {
-  if (!s_dc_init && len > 0) {
-    s_dc_x_prev = data[0];
-    s_dc_y_prev = 0.0f;
+  if (len <= 0) return;
+
+  // Step 1: Pre-center by removing block DC offset using double precision
+  double sum = 0.0;
+  for (int i = 0; i < len; i++) {
+    sum += (double)data[i];
+  }
+  double mean = sum / (double)len;
+  for (int i = 0; i < len; i++) {
+    data[i] = (float)((double)data[i] - mean);
+  }
+
+  // Step 2: 0.5 Hz High-Pass DC Filter on centered AC signal (zero blowup)
+  if (!s_dc_init) {
+    s_dc_x_prev = (double)data[0];
+    s_dc_y_prev = 0.0;
     s_dc_init = true;
   }
-  const float R = 0.99925f; // ~0.48 Hz cutoff @ 4000 SPS (AHA clinical standard)
+
+  const double R = 0.99925; // ~0.48 Hz cutoff @ 4000 SPS (AHA clinical standard)
   for (int i = 0; i < len; i++) {
-    float x = data[i];
-    float y = x - s_dc_x_prev + R * s_dc_y_prev;
+    double x = (double)data[i];
+    double y = x - s_dc_x_prev + R * s_dc_y_prev;
     s_dc_x_prev = x;
     s_dc_y_prev = y;
-    data[i] = y;
+    data[i] = (float)y;
   }
 }
 

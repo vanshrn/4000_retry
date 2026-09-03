@@ -67,37 +67,9 @@
 #endif
 
 // -----------------------------------------------------------
-// FastLZ Compressed Upload Queue Structures in PSRAM
+// Upload Queue Structures in PSRAM (Direct 32-bit Raw & Filtered Storage)
 // -----------------------------------------------------------
-#define FASTLZ_MAX_BLOCK_SIZE 5632
-
-#pragma pack(push, 1)
-struct DeltaBuffer
-{
-  int32_t raw_anchor;
-  int16_t raw_deltas[WINDOW_SIZE - 1];
-  int32_t filt_anchor;
-  int16_t filt_deltas[WINDOW_SIZE - 1];
-};
-#pragma pack(pop)
-
 struct CompressedPayload
-{
-  uint32_t seq;
-  bool leadsOff;
-  bool loPlus;
-  bool loMinus;
-  char warning[32];
-  char severity[32];
-  char mode[16];
-  char deviceResult[128];
-  PerformanceMetrics metrics;
-  bool hasMetrics;
-  uint16_t compressed_len;
-  uint8_t compressed_data[FASTLZ_MAX_BLOCK_SIZE];
-};
-
-struct UploadPayload
 {
   int32_t raw_data[WINDOW_SIZE];
   int32_t filtered_data[WINDOW_SIZE];
@@ -113,15 +85,15 @@ struct UploadPayload
   bool hasMetrics;
 };
 
+using UploadPayload = CompressedPayload;
+
 // -----------------------------------------------------------
 // Network & Upload State
 // -----------------------------------------------------------
 static CompressedPayload *s_payloadPool = nullptr;
 static QueueHandle_t s_uploadQueue = nullptr;
 static QueueHandle_t s_freePayloadQueue = nullptr;
-static DeltaBuffer *s_deltaEncodeBuf = nullptr;
-static DeltaBuffer *s_deltaDecodeBuf = nullptr;
-static UploadPayload *s_decompressBuf = nullptr;
+static bool postPayload(const char *buf, size_t len);
 
 static WebServer s_server(80);
 static Preferences s_prefs;
@@ -501,20 +473,11 @@ void network_init()
     xQueueSend(s_freePayloadQueue, &p, 0);
   }
 
-  s_deltaEncodeBuf = (DeltaBuffer *)ps_malloc(sizeof(DeltaBuffer));
-  s_deltaDecodeBuf = (DeltaBuffer *)ps_malloc(sizeof(DeltaBuffer));
-  s_decompressBuf = (UploadPayload *)ps_malloc(sizeof(UploadPayload));
-
-  if (!s_deltaEncodeBuf || !s_deltaDecodeBuf || !s_decompressBuf)
-  {
-    Serial.println(F("[NET] FATAL: Compression scratchpad PSRAM alloc failed!"));
-  }
-
   s_wsMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(wsTaskWorker, "ws_loop_task", 8192, nullptr, 1, nullptr, 0);
   xTaskCreatePinnedToCore(uploadTask, "ecg_upload", 16384, nullptr, 1, nullptr, 0);
   xTaskCreatePinnedToCore(localStatusTask, "local_status", 4096, nullptr, 1, nullptr, 0);
-  Serial.printf("[NET] FastLZ Compressed Queue initialized (%u slots, ~%.1f MB in PSRAM).\n",
+  Serial.printf("[NET] Lossless Delta Queue initialized (%u slots, ~%.1f MB in PSRAM).\n",
                 (unsigned)UPLOAD_QUEUE_DEPTH,
                 (float)(sizeof(CompressedPayload) * UPLOAD_QUEUE_DEPTH) / (1024.0f * 1024.0f));
 }
@@ -674,49 +637,13 @@ bool network_uploadBlock(const Block &blk, bool leadsOff, bool loPlus,
       return false;
   }
 
-  // 1. Lossless Delta Encoding & FastLZ Compression on Core 1 (< 0.5ms)
-  if (s_deltaEncodeBuf)
-  {
-    s_deltaEncodeBuf->raw_anchor = blk.data[0];
-    for (int i = 1; i < WINDOW_SIZE; i++)
-    {
-      int32_t d = blk.data[i] - blk.data[i - 1];
-      if (d > 32767) d = 32767;
-      if (d < -32768) d = -32768;
-      s_deltaEncodeBuf->raw_deltas[i - 1] = (int16_t)d;
-    }
-
+  // 1. Direct 32-bit Raw & Filtered Sample Storage (< 0.01ms)
+  memcpy(p->raw_data, blk.data, sizeof(int32_t) * WINDOW_SIZE);
 #if RAW_DATA_ONLY
-    s_deltaEncodeBuf->filt_anchor = blk.data[0];
-    for (int i = 1; i < WINDOW_SIZE; i++)
-    {
-      int32_t d = blk.data[i] - blk.data[i - 1];
-      if (d > 32767) d = 32767;
-      if (d < -32768) d = -32768;
-      s_deltaEncodeBuf->filt_deltas[i - 1] = (int16_t)d;
-    }
+  memcpy(p->filtered_data, blk.data, sizeof(int32_t) * WINDOW_SIZE);
 #else
-    s_deltaEncodeBuf->filt_anchor = blk.filtered_data[0];
-    for (int i = 1; i < WINDOW_SIZE; i++)
-    {
-      int32_t d = blk.filtered_data[i] - blk.filtered_data[i - 1];
-      if (d > 32767) d = 32767;
-      if (d < -32768) d = -32768;
-      s_deltaEncodeBuf->filt_deltas[i - 1] = (int16_t)d;
-    }
+  memcpy(p->filtered_data, blk.filtered_data, sizeof(int32_t) * WINDOW_SIZE);
 #endif
-
-    int cLen = fastlz_compress(s_deltaEncodeBuf, sizeof(DeltaBuffer), p->compressed_data);
-    if (cLen > 0 && cLen <= FASTLZ_MAX_BLOCK_SIZE)
-    {
-      p->compressed_len = (uint16_t)cLen;
-    }
-    else
-    {
-      memcpy(p->compressed_data, s_deltaEncodeBuf, FASTLZ_MAX_BLOCK_SIZE);
-      p->compressed_len = FASTLZ_MAX_BLOCK_SIZE;
-    }
-  }
 
   p->seq = blk.seq;
   p->leadsOff = leadsOff;
@@ -1074,7 +1001,7 @@ static void uploadTask(void *pv)
 
   for (;;)
   {
-    if (!s_jsonBuf || !s_decompressBuf || !s_deltaDecodeBuf)
+    if (!s_jsonBuf)
     {
       vTaskDelay(10 / portTICK_PERIOD_MS);
       continue;
@@ -1107,58 +1034,9 @@ static void uploadTask(void *pv)
       syncUserIdFromBackend();
     }
 
-    // Wait for WebSocket connection before draining the queue
-    if (!s_wsConnected)
-    {
-      vTaskDelay(50 / portTICK_PERIOD_MS);
-      continue;
-    }
-
     if (xQueueReceive(s_uploadQueue, &p, pdMS_TO_TICKS(10)) == pdTRUE)
     {
-      // 1. Lossless FastLZ Decompression (< 0.25ms)
-      int decLen = (p->compressed_len > 0)
-                       ? fastlz_decompress(p->compressed_data, p->compressed_len,
-                                           s_deltaDecodeBuf, sizeof(DeltaBuffer))
-                       : 0;
-
-      if (decLen == sizeof(DeltaBuffer))
-      {
-        // 2. Reconstruct exact full 32-bit sample arrays
-        s_decompressBuf->raw_data[0] = s_deltaDecodeBuf->raw_anchor;
-        for (int i = 1; i < WINDOW_SIZE; i++)
-        {
-          s_decompressBuf->raw_data[i] = s_decompressBuf->raw_data[i - 1] + (int32_t)s_deltaDecodeBuf->raw_deltas[i - 1];
-        }
-
-        s_decompressBuf->filtered_data[0] = s_deltaDecodeBuf->filt_anchor;
-        for (int i = 1; i < WINDOW_SIZE; i++)
-        {
-          s_decompressBuf->filtered_data[i] = s_decompressBuf->filtered_data[i - 1] + (int32_t)s_deltaDecodeBuf->filt_deltas[i - 1];
-        }
-      }
-      else
-      {
-        // Zero-fill safe fallback
-        for (int i = 0; i < WINDOW_SIZE; i++)
-        {
-          s_decompressBuf->raw_data[i] = 0;
-          s_decompressBuf->filtered_data[i] = 0;
-        }
-      }
-
-      s_decompressBuf->seq = p->seq;
-      s_decompressBuf->leadsOff = p->leadsOff;
-      s_decompressBuf->loPlus = p->loPlus;
-      s_decompressBuf->loMinus = p->loMinus;
-      strcpy(s_decompressBuf->warning, p->warning);
-      strcpy(s_decompressBuf->severity, p->severity);
-      strcpy(s_decompressBuf->mode, p->mode);
-      strcpy(s_decompressBuf->deviceResult, p->deviceResult);
-      s_decompressBuf->metrics = p->metrics;
-      s_decompressBuf->hasMetrics = p->hasMetrics;
-
-      size_t len = buildJsonBuffer(*s_decompressBuf, s_jsonBuf, JSON_BUF_SIZE);
+      size_t len = buildJsonBuffer(*p, s_jsonBuf, JSON_BUF_SIZE);
       if (len > 0)
       {
         bool sentViaWs = false;
@@ -1166,9 +1044,13 @@ static void uploadTask(void *pv)
         if (s_wsMutex &&
             xSemaphoreTake(s_wsMutex, pdMS_TO_TICKS(100)) == pdTRUE)
         {
-          sentViaWs = s_webSocket.sendTXT((uint8_t *)s_jsonBuf, len);
+          if (s_wsConnected)
+          {
+            sentViaWs = s_webSocket.sendTXT((uint8_t *)s_jsonBuf, len);
+          }
           xSemaphoreGive(s_wsMutex);
         }
+
         if (sentViaWs)
         {
           uint32_t elapsed = millis() - t0;
@@ -1184,15 +1066,35 @@ static void uploadTask(void *pv)
                         (unsigned)remaining, (unsigned)UPLOAD_QUEUE_DEPTH,
                         filledBytes, totalPoolBytes,
                         freeDram, freePsram);
-          // Yield 10ms after a successful transmission to allow TCP ACKs to clear smoothly
           vTaskDelay(10 / portTICK_PERIOD_MS);
         }
         else
         {
-          Serial.printf("[WS DEBUG] sendTXT failed for seq=%u, length=%u bytes\n",
-                        (unsigned)p->seq, (unsigned)len);
-          // Yield briefly to let WebSocket worker re-establish TCP socket
-          vTaskDelay(50 / portTICK_PERIOD_MS);
+          // WebSocket unavailable or frame rejected -> Fallback to rock-solid chunked HTTPS POST
+          bool sentHttp = postPayload(s_jsonBuf, len);
+          if (sentHttp)
+          {
+            uint32_t elapsed = millis() - t0;
+            UBaseType_t remaining =
+                s_uploadQueue ? uxQueueMessagesWaiting(s_uploadQueue) : 0;
+            uint32_t filledBytes = (uint32_t)remaining * sizeof(CompressedPayload);
+            uint32_t totalPoolBytes = UPLOAD_QUEUE_DEPTH * sizeof(CompressedPayload);
+            uint32_t freeDram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            uint32_t freePsram = (uint32_t)ESP.getFreePsram();
+
+            Serial.printf("[HTTP POST] Sent seq=%u (%u ms, %u bytes) | Queue: %u/%u | Pool: %u / %u bytes | Free DRAM: %u bytes | Free PSRAM: %u bytes\n",
+                          (unsigned)p->seq, (unsigned)elapsed, (unsigned)len,
+                          (unsigned)remaining, (unsigned)UPLOAD_QUEUE_DEPTH,
+                          filledBytes, totalPoolBytes,
+                          freeDram, freePsram);
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+          }
+          else
+          {
+            Serial.printf("[NET ERROR] Both WS and HTTP POST failed for seq=%u, length=%u bytes\n",
+                          (unsigned)p->seq, (unsigned)len);
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+          }
         }
       }
 
@@ -1294,31 +1196,17 @@ static size_t buildJsonBuffer(const UploadPayload &p, char *buf,
                     p.metrics.motionAccuracy, p.metrics.cmrrEstDb);
   }
 
-  // Output 2D Array of sample pairs: "data": [[raw0, filtered0], [raw1,
-  // filtered1], ...]
-  const int32_t RAW_MAX = 8000000;
-  const int32_t RAW_MIN = -8000000;
+  // Output 2D Array of sample pairs: "data": [[raw0, filtered0], [raw1, filtered1], ...]
   pos += snprintf(buf + pos, bufSize - pos, "\"data\":[");
   for (int i = 0; i < WINDOW_SIZE && pos < (int)(bufSize - 35); i++)
   {
     int32_t raw = p.raw_data[i];
     int32_t filt = p.filtered_data[i];
-    // Clamp to valid ADC range
-    if (raw > RAW_MAX)
-      raw = RAW_MAX;
-    if (raw < RAW_MIN)
-      raw = RAW_MIN;
-    // Replace true saturated rail spikes (> 7.5M counts)
-    if (raw < -7500000 || raw > 7500000)
-    {
-      int32_t left = (i > 0) ? p.raw_data[i - 1] : 0;
-      int32_t right = (i < WINDOW_SIZE - 1) ? p.raw_data[i + 1] : left;
-      if (left < -7500000 || left > 7500000)
-        left = 0;
-      if (right < -7500000 || right > 7500000)
-        right = left;
-      raw = (left + right) / 2;
-    }
+    if (raw > 8388607)
+      raw = 8388607;
+    if (raw < -8388608)
+      raw = -8388608;
+
     buf[pos++] = '[';
     pos += fast_itoa(raw, buf + pos);
     buf[pos++] = ',';

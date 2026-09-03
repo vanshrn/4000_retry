@@ -133,6 +133,5 @@
 #define NVS_NAMESPACE                "ecg_cfg"
 
 // ==========================================================
-// FreeRTOS Upload Queue
-// ==========================================================
-#define UPLOAD_QUEUE_DEPTH           1200
+// Upload Queue Depth (200 blocks = 3.33 minutes of full 32-bit raw + filtered ECG in PSRAM with 1.9MB headroom)
+#define UPLOAD_QUEUE_DEPTH           200
