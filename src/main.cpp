@@ -58,7 +58,7 @@
 static ADS1292R ads;
 static ECGPipeline *pipeline = nullptr;
 static IMUDriver imu;
-static MotionCalibration g_motionCalibration;
+static MotionCalibration *g_motionCalibration = nullptr;
 
 // ==========================================================
 // Ping-Pong Buffers — allocated from PSRAM in setup().
@@ -470,8 +470,9 @@ static void processBlock()
 
   // 4. Apply Calibration-Range-Based Motion Noise Reduction on filtered_data
   // (for Wi-Fi / DB)
-  g_motionCalibration.applyMotionNoiseReduction(
-      blk.filtered_data, blk.sampleValid, WINDOW_SIZE, seq);
+  if (g_motionCalibration)
+    g_motionCalibration->applyMotionNoiseReduction(
+        blk.filtered_data, blk.sampleValid, WINDOW_SIZE, seq);
 
   // 5. Perform Peak Detection & Heart Rate calculation on this 4000-sample
   // block
@@ -568,8 +569,11 @@ void setup()
   pipeline = (ECGPipeline *)ps_malloc(sizeof(ECGPipeline));
   if (!pipeline)
     pipeline = new ECGPipeline();
+  g_motionCalibration = (MotionCalibration *)ps_malloc(sizeof(MotionCalibration));
+  if (g_motionCalibration)
+    new (g_motionCalibration) MotionCalibration();
 
-  if (!g_buffers || !g_motionMask || !g_analysisWindow || !pipeline)
+  if (!g_buffers || !g_motionMask || !g_analysisWindow || !pipeline || !g_motionCalibration)
   {
     Serial.println(F("[FATAL] PSRAM allocation failed! Halting."));
     while (true)
