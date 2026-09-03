@@ -1117,24 +1117,34 @@ static void uploadTask(void *pv)
     if (xQueueReceive(s_uploadQueue, &p, pdMS_TO_TICKS(10)) == pdTRUE)
     {
       // 1. Lossless FastLZ Decompression (< 0.25ms)
-      int decLen = fastlz_decompress(p->compressed_data, p->compressed_len,
-                                     s_deltaDecodeBuf, sizeof(DeltaBuffer));
-      if (decLen <= 0)
-      {
-        memcpy(s_deltaDecodeBuf, p->compressed_data, sizeof(DeltaBuffer));
-      }
+      int decLen = (p->compressed_len > 0)
+                       ? fastlz_decompress(p->compressed_data, p->compressed_len,
+                                           s_deltaDecodeBuf, sizeof(DeltaBuffer))
+                       : 0;
 
-      // 2. Reconstruct exact full 32-bit sample arrays
-      s_decompressBuf->raw_data[0] = s_deltaDecodeBuf->raw_anchor;
-      for (int i = 1; i < WINDOW_SIZE; i++)
+      if (decLen == sizeof(DeltaBuffer))
       {
-        s_decompressBuf->raw_data[i] = s_decompressBuf->raw_data[i - 1] + (int32_t)s_deltaDecodeBuf->raw_deltas[i - 1];
-      }
+        // 2. Reconstruct exact full 32-bit sample arrays
+        s_decompressBuf->raw_data[0] = s_deltaDecodeBuf->raw_anchor;
+        for (int i = 1; i < WINDOW_SIZE; i++)
+        {
+          s_decompressBuf->raw_data[i] = s_decompressBuf->raw_data[i - 1] + (int32_t)s_deltaDecodeBuf->raw_deltas[i - 1];
+        }
 
-      s_decompressBuf->filtered_data[0] = s_deltaDecodeBuf->filt_anchor;
-      for (int i = 1; i < WINDOW_SIZE; i++)
+        s_decompressBuf->filtered_data[0] = s_deltaDecodeBuf->filt_anchor;
+        for (int i = 1; i < WINDOW_SIZE; i++)
+        {
+          s_decompressBuf->filtered_data[i] = s_decompressBuf->filtered_data[i - 1] + (int32_t)s_deltaDecodeBuf->filt_deltas[i - 1];
+        }
+      }
+      else
       {
-        s_decompressBuf->filtered_data[i] = s_decompressBuf->filtered_data[i - 1] + (int32_t)s_deltaDecodeBuf->filt_deltas[i - 1];
+        // Zero-fill safe fallback
+        for (int i = 0; i < WINDOW_SIZE; i++)
+        {
+          s_decompressBuf->raw_data[i] = 0;
+          s_decompressBuf->filtered_data[i] = 0;
+        }
       }
 
       s_decompressBuf->seq = p->seq;

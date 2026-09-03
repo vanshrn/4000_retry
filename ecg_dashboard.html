@@ -1,0 +1,535 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ECG Live Server Inspector & Recorder — 4000 SPS</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-dim: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --coral: #f78166;
+      --yellow: #d29922;
+      --red: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--card-bg);
+      padding: 14px 20px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .header-title { display: flex; align-items: center; gap: 12px; }
+    .status-badge {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-weight: bold;
+      background: #21262d;
+      color: var(--text-dim);
+    }
+    .status-online { background: rgba(63, 185, 80, 0.2); color: var(--green); border: 1px solid var(--green); }
+    .status-offline { background: rgba(248, 81, 73, 0.2); color: var(--red); border: 1px solid var(--red); }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+    }
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+    }
+    .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; }
+    .stat-val { font-size: 20px; font-weight: bold; color: var(--accent); }
+    .canvas-container {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .canvas-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: bold;
+    }
+    canvas {
+      width: 100%;
+      height: 180px;
+      background: #090d13;
+      border-radius: 6px;
+      border: 1px solid #21262d;
+    }
+    .inspector-panel {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .inspector-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .btn-group { display: flex; gap: 8px; align-items: center; }
+    pre {
+      background: #090d13;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 11px;
+      color: #79c0ff;
+      max-height: 280px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .btn {
+      background: #238636;
+      color: white;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { background: #2ea043; }
+    .btn-secondary { background: #21262d; border: 1px solid var(--border); color: var(--text); }
+    .btn-secondary:hover { background: #30363d; }
+    .btn-danger { background: #da3633; color: white; }
+    .btn-danger:hover { background: #f85149; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th, td {
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th { background: #090d13; color: var(--text-dim); }
+    tr:hover { background: #21262d; cursor: pointer; }
+    .history-table-wrapper {
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="header-title">
+      <h2 style="font-size: 18px;">🩺 Live ECG Server Inspector & Recorder</h2>
+      <span id="connBadge" class="status-badge status-offline">Connecting...</span>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <button id="pauseBtn" class="btn btn-secondary">⏸️ Pause Stream</button>
+      <button id="recordBtn" class="btn btn-danger">⏺️ Start Recording</button>
+      <button id="downloadJsonBtn" class="btn btn-secondary" disabled>💾 Export JSON</button>
+      <button id="downloadCsvBtn" class="btn btn-secondary" disabled>📊 Export CSV</button>
+    </div>
+  </header>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Sequence #</div>
+      <div id="statSeq" class="stat-val">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Samples / Block</div>
+      <div id="statSps" class="stat-val">4000</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Heart Rate</div>
+      <div id="statHr" class="stat-val">— BPM</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">SNR (dB)</div>
+      <div id="statSnr" class="stat-val">— dB</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Blocks</div>
+      <div id="statBlocks" class="stat-val">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Recorded in Memory</div>
+      <div id="statRecCount" class="stat-val" style="color: var(--yellow);">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Lead Status</div>
+      <div id="statLead" class="stat-val" style="color: var(--green);">OK</div>
+    </div>
+  </div>
+
+  <div class="canvas-container">
+    <div class="canvas-header">
+      <span style="color: var(--coral);">📊 Raw ADC Signal (24-bit Channel 2)</span>
+      <span id="rawRange" style="font-size: 11px; color: var(--text-dim);">Range: —</span>
+    </div>
+    <canvas id="rawCanvas"></canvas>
+  </div>
+
+  <div class="canvas-container">
+    <div class="canvas-header">
+      <span style="color: var(--green);">⚡ ESP32 DSP Filtered Signal (Clean ECG)</span>
+      <span id="filtRange" style="font-size: 11px; color: var(--text-dim);">Range: —</span>
+    </div>
+    <canvas id="filtCanvas"></canvas>
+  </div>
+
+  <div class="inspector-panel">
+    <div class="inspector-header">
+      <h3 style="font-size: 14px;">📦 Full Incoming Payload (Live JSON Viewer)</h3>
+      <div class="btn-group">
+        <button id="toggleViewBtn" class="btn btn-secondary">Toggle Full / Summary View</button>
+        <button id="copyJsonBtn" class="btn btn-secondary">📋 Copy JSON</button>
+      </div>
+    </div>
+    <pre id="jsonPreview">// Waiting for incoming packets from backend server...</pre>
+  </div>
+
+  <div class="inspector-panel">
+    <div class="inspector-header">
+      <h3 style="font-size: 14px;">📜 Recorded Block History (Click to Inspect)</h3>
+      <button id="clearHistoryBtn" class="btn btn-secondary" style="font-size: 11px;">Clear History</button>
+    </div>
+    <div class="history-table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Seq #</th>
+            <th>Samples</th>
+            <th>Lead-Off</th>
+            <th>First Raw</th>
+            <th>First Filtered</th>
+            <th>HR (BPM)</th>
+            <th>SNR (dB)</th>
+          </tr>
+        </thead>
+        <tbody id="historyTableBody">
+          <tr><td colspan="8" style="text-align: center; color: var(--text-dim);">No blocks recorded yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const SSE_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123';
+    const MAX_POINTS = 8000;
+    const DOWNSAMPLE = 4;
+
+    let rawBuffer = [];
+    let filtBuffer = [];
+    let totalBlocks = 0;
+    let isPaused = false;
+    let isRecording = true; // Auto-records incoming blocks
+    let showFullJson = true; // Shows complete raw sample arrays
+    let lastFullPayload = null;
+    let recordedSession = [];
+    let evtSource = null;
+
+    const rawCanvas = document.getElementById('rawCanvas');
+    const filtCanvas = document.getElementById('filtCanvas');
+    const rawCtx = rawCanvas.getContext('2d');
+    const filtCtx = filtCanvas.getContext('2d');
+
+    function resizeCanvas() {
+      rawCanvas.width = rawCanvas.clientWidth * window.devicePixelRatio;
+      rawCanvas.height = rawCanvas.clientHeight * window.devicePixelRatio;
+      filtCanvas.width = filtCanvas.clientWidth * window.devicePixelRatio;
+      filtCanvas.height = filtCanvas.clientHeight * window.devicePixelRatio;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function updateJsonDisplay() {
+      if (!lastFullPayload) return;
+      if (showFullJson) {
+        document.getElementById('jsonPreview').textContent = JSON.stringify(lastFullPayload, null, 2);
+      } else {
+        const rec = lastFullPayload.record || lastFullPayload;
+        const samples = rec.data || [];
+        const summary = {
+          seq: rec.seq,
+          deviceId: rec.deviceId || rec.device_id || "ESP_ECG_123",
+          sampleCount: samples.length,
+          leadsOff: rec.leadsOff || rec.leads_off || false,
+          first10RawSamples: samples.slice(0, 10).map(s => Array.isArray(s) ? s[0] : s),
+          first10FilteredSamples: samples.slice(0, 10).map(s => Array.isArray(s) ? s[1] : s),
+          metrics: rec.metrics || {},
+          warning: rec.warning || "",
+          severity: rec.severity || "NORMAL"
+        };
+        document.getElementById('jsonPreview').textContent = JSON.stringify(summary, null, 2);
+      }
+    }
+
+    function addHistoryRow(rec, samples) {
+      const tbody = document.getElementById('historyTableBody');
+      if (recordedSession.length === 1) tbody.innerHTML = '';
+
+      const tr = document.createElement('tr');
+      const timeStr = new Date().toLocaleTimeString();
+      const firstR = samples[0] ? (Array.isArray(samples[0]) ? samples[0][0] : samples[0]) : '-';
+      const firstF = samples[0] ? (Array.isArray(samples[0]) ? samples[0][1] : samples[0]) : '-';
+      const hr = rec.metrics?.hrBpm ? rec.metrics.hrBpm.toFixed(1) : '-';
+      const snr = rec.metrics?.snrDb ? rec.metrics.snrDb.toFixed(1) : '-';
+      const lo = rec.leadsOff || rec.leads_off ? 'YES' : 'NO';
+
+      tr.innerHTML = `
+        <td>${timeStr}</td>
+        <td><strong>#${rec.seq || totalBlocks}</strong></td>
+        <td>${samples.length}</td>
+        <td style="color: ${lo === 'YES' ? 'var(--red)' : 'var(--green)'}">${lo}</td>
+        <td>${firstR}</td>
+        <td>${firstF}</td>
+        <td>${hr}</td>
+        <td>${snr}</td>
+      `;
+
+      tr.addEventListener('click', () => {
+        lastFullPayload = rec;
+        updateJsonDisplay();
+      });
+
+      tbody.insertBefore(tr, tbody.firstChild);
+      if (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+    }
+
+    function connectSSE() {
+      const badge = document.getElementById('connBadge');
+      badge.textContent = 'Connecting...';
+      badge.className = 'status-badge status-offline';
+
+      if (evtSource) evtSource.close();
+      evtSource = new EventSource(SSE_URL);
+
+      evtSource.onopen = () => {
+        badge.textContent = '🟢 Streaming Live';
+        badge.className = 'status-badge status-online';
+      };
+
+      evtSource.onmessage = (event) => {
+        if (isPaused || !event.data) return;
+        try {
+          const payload = JSON.parse(event.data);
+          const rec = payload.record || payload;
+          const samples = rec.data || [];
+          if (!samples || samples.length === 0) return;
+
+          totalBlocks++;
+          lastFullPayload = payload;
+          updateJsonDisplay();
+
+          if (isRecording) {
+            recordedSession.push(payload);
+            document.getElementById('statRecCount').textContent = recordedSession.length;
+            document.getElementById('downloadJsonBtn').disabled = false;
+            document.getElementById('downloadCsvBtn').disabled = false;
+            addHistoryRow(rec, samples);
+          }
+
+          document.getElementById('statSeq').textContent = rec.seq || totalBlocks;
+          document.getElementById('statBlocks').textContent = totalBlocks;
+
+          if (rec.metrics) {
+            if (rec.metrics.hrBpm) document.getElementById('statHr').textContent = rec.metrics.hrBpm.toFixed(1) + ' BPM';
+            if (rec.metrics.snrDb) document.getElementById('statSnr').textContent = rec.metrics.snrDb.toFixed(1) + ' dB';
+          }
+
+          const lo = rec.leadsOff || rec.leads_off || false;
+          const leadEl = document.getElementById('statLead');
+          if (lo) {
+            leadEl.textContent = 'LEADS OFF';
+            leadEl.style.color = 'var(--red)';
+          } else {
+            leadEl.textContent = 'CONNECTED';
+            leadEl.style.color = 'var(--green)';
+          }
+
+          for (let i = 0; i < samples.length; i++) {
+            const s = samples[i];
+            if (Array.isArray(s) && s.length >= 2) {
+              rawBuffer.push(s[0]);
+              filtBuffer.push(s[1]);
+            } else {
+              rawBuffer.push(s);
+              filtBuffer.push(s);
+            }
+          }
+
+          while (rawBuffer.length > MAX_POINTS) rawBuffer.shift();
+          while (filtBuffer.length > MAX_POINTS) filtBuffer.shift();
+
+        } catch (e) {
+          console.error("Parse error:", e);
+        }
+      };
+
+      evtSource.onerror = () => {
+        badge.textContent = '🔴 Disconnected (Retrying...)';
+        badge.className = 'status-badge status-offline';
+      };
+    }
+
+    function renderPlot(ctx, data, color, rangeElId) {
+      const w = ctx.canvas.width;
+      const h = ctx.canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      ctx.strokeStyle = '#1c232d';
+      ctx.lineWidth = 1;
+      for (let y = 0; y < h; y += h / 5) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+
+      if (data.length < 2) return;
+
+      const step = DOWNSAMPLE;
+      const len = Math.floor(data.length / step);
+      let min = Infinity, max = -Infinity;
+
+      for (let i = 0; i < data.length; i += step) {
+        const v = data[i];
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+
+      const pad = Math.max((max - min) * 0.15, 100);
+      const yMin = min - pad;
+      const yMax = max + pad;
+      const yRange = (yMax - yMin) || 1;
+
+      document.getElementById(rangeElId).textContent = `Min: ${Math.round(min)} | Max: ${Math.round(max)} | P-P: ${Math.round(max - min)}`;
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2 * window.devicePixelRatio;
+      ctx.beginPath();
+
+      const dx = w / len;
+      for (let i = 0; i < len; i++) {
+        const x = i * dx;
+        const norm = (data[i * step] - yMin) / yRange;
+        const y = h - (norm * h);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    function animLoop() {
+      renderPlot(rawCtx, rawBuffer, '#f78166', 'rawRange');
+      renderPlot(filtCtx, filtBuffer, '#3fb950', 'filtRange');
+      requestAnimationFrame(animLoop);
+    }
+
+    // Controls
+    document.getElementById('pauseBtn').addEventListener('click', function() {
+      isPaused = !isPaused;
+      this.textContent = isPaused ? '▶️ Resume Stream' : '⏸️ Pause Stream';
+      this.className = isPaused ? 'btn' : 'btn btn-secondary';
+    });
+
+    document.getElementById('recordBtn').addEventListener('click', function() {
+      isRecording = !isRecording;
+      this.textContent = isRecording ? '⏹️ Stop Recording' : '⏺️ Start Recording';
+      this.className = isRecording ? 'btn btn-danger' : 'btn btn-secondary';
+    });
+
+    document.getElementById('toggleViewBtn').addEventListener('click', () => {
+      showFullJson = !showFullJson;
+      updateJsonDisplay();
+    });
+
+    document.getElementById('copyJsonBtn').addEventListener('click', () => {
+      if (lastFullPayload) {
+        navigator.clipboard.writeText(JSON.stringify(lastFullPayload, null, 2));
+        alert('Copied full JSON payload to clipboard!');
+      }
+    });
+
+    document.getElementById('clearHistoryBtn').addEventListener('click', () => {
+      recordedSession = [];
+      document.getElementById('statRecCount').textContent = '0';
+      document.getElementById('historyTableBody').innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-dim);">No blocks recorded yet.</td></tr>';
+      document.getElementById('downloadJsonBtn').disabled = true;
+      document.getElementById('downloadCsvBtn').disabled = true;
+    });
+
+    document.getElementById('downloadJsonBtn').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(recordedSession, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ecg_session_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    document.getElementById('downloadCsvBtn').addEventListener('click', () => {
+      let csv = 'block_seq,sample_index,raw_adc,filtered_ecg\n';
+      recordedSession.forEach(pkt => {
+        const rec = pkt.record || pkt;
+        const seq = rec.seq || 0;
+        const data = rec.data || [];
+        data.forEach((s, idx) => {
+          const raw = Array.isArray(s) ? s[0] : s;
+          const filt = Array.isArray(s) ? s[1] : s;
+          csv += `${seq},${idx},${raw},${filt}\n`;
+        });
+      });
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ecg_session_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    connectSSE();
+    requestAnimationFrame(animLoop);
+  </script>
+</body>
+</html>

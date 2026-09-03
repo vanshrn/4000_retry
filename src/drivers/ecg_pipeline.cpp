@@ -215,8 +215,8 @@ void ECGPipeline::_applyIIRNotch100(float *data, int len) {
   }
 }
 
-// 40-tap FIR Comb Notch Filter with Inter-Block History
-static float s_fir_notch_prev[40];
+// 80-tap FIR Comb Notch Filter for 4000 SPS (4000 / 50 = 80 samples) with Inter-Block History
+static float s_fir_notch_prev[80];
 static bool s_fir_notch_has_prev = false;
 
 void ECGPipeline::_applyFIRNotch(float *data, int len) {
@@ -226,13 +226,14 @@ void ECGPipeline::_applyFIRNotch(float *data, int len) {
     if (!temp) temp = (float *)malloc(sizeof(float) * WINDOW_SIZE);
   }
   if (!temp) return;
+
   for (int i = 0; i < len; i++) {
     float ma50 = 0.0f;
-    for (int k = -19; k <= 20; k++) {
+    for (int k = -39; k <= 40; k++) {
       int idx = i + k;
       float val;
       if (idx < 0) {
-        val = s_fir_notch_has_prev ? s_fir_notch_prev[40 + idx] : data[0];
+        val = s_fir_notch_has_prev ? s_fir_notch_prev[80 + idx] : data[0];
       } else if (idx >= len) {
         val = data[len - 1];
       } else {
@@ -240,18 +241,19 @@ void ECGPipeline::_applyFIRNotch(float *data, int len) {
       }
       ma50 += val;
     }
-    ma50 /= 40.0f;
-    temp[i] = data[i] - (data[i] - ma50) * 0.95f;
+    ma50 /= 80.0f;
+    temp[i] = data[i] - (data[i] - ma50) * 0.98f;
   }
-  if (len >= 40) {
-    memcpy(s_fir_notch_prev, data + len - 40, 40 * sizeof(float));
+
+  if (len >= 80) {
+    memcpy(s_fir_notch_prev, data + len - 80, 80 * sizeof(float));
     s_fir_notch_has_prev = true;
   }
   memcpy(data, temp, len * sizeof(float));
 }
 
-// Zero-Phase FIR Low-Pass (9-tap Gaussian @ 4000 SPS, ~60 Hz cutoff) with Inter-Block History
-static float s_fir_lp_prev[10];
+// Zero-Phase FIR Low-Pass (37-tap Gaussian @ 4000 SPS, ~60 Hz cutoff) with Inter-Block History
+static float s_fir_lp_prev[37];
 static bool s_fir_lp_has_prev = false;
 
 void ECGPipeline::_applyFIRLowPass(float *data, int len) {
@@ -261,27 +263,30 @@ void ECGPipeline::_applyFIRLowPass(float *data, int len) {
     if (!temp) temp = (float *)malloc(sizeof(float) * WINDOW_SIZE);
   }
   if (!temp) return;
+
+  // Pre-computed Gaussian weights for sigma = 12.0 samples @ 4000 SPS (fc ≈ 60 Hz)
+  static const float gWeights[19] = {
+      1.000000f, 0.996534f, 0.986211f, 0.969233f, 0.945959f, 0.916891f,
+      0.882497f, 0.843332f, 0.800000f, 0.753175f, 0.703511f, 0.651680f,
+      0.598375f, 0.544283f, 0.490074f, 0.436384f, 0.383794f, 0.332837f,
+      0.283997f};
+  static const float totalWeight = 27.13470f;
+
   for (int i = 0; i < len; i++) {
-    float sum = 0.0f;
-    float weightSum = 0.0f;
-    for (int k = -4; k <= 4; k++) {
-      int idx = i + k;
-      float val;
-      if (idx < 0) {
-        val = s_fir_lp_has_prev ? s_fir_lp_prev[10 + idx] : data[0];
-      } else if (idx >= len) {
-        val = data[len - 1];
-      } else {
-        val = data[idx];
-      }
-      float w = expf(-0.5f * (k * k) / (2.2f * 2.2f));
-      sum += val * w;
-      weightSum += w;
+    float sum = data[i] * gWeights[0];
+    for (int k = 1; k <= 18; k++) {
+      int idxL = i - k;
+      int idxR = i + k;
+      float valL = (idxL < 0) ? (s_fir_lp_has_prev ? s_fir_lp_prev[37 + idxL] : data[0])
+                              : data[idxL];
+      float valR = (idxR >= len) ? data[len - 1] : data[idxR];
+      sum += (valL + valR) * gWeights[k];
     }
-    temp[i] = sum / weightSum;
+    temp[i] = sum / totalWeight;
   }
-  if (len >= 10) {
-    memcpy(s_fir_lp_prev, data + len - 10, 10 * sizeof(float));
+
+  if (len >= 37) {
+    memcpy(s_fir_lp_prev, data + len - 37, 37 * sizeof(float));
     s_fir_lp_has_prev = true;
   }
   memcpy(data, temp, len * sizeof(float));
