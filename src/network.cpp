@@ -764,18 +764,19 @@ bool network_uploadBlock(const Block &blk, bool leadsOff, bool loPlus,
     p->hasMetrics = false;
   }
 
-  UBaseType_t queuedBefore = uxQueueMessagesWaiting(s_uploadQueue);
-  Serial.printf("[NET QUEUE] Enqueue block seq=%u | Mode=%s | LO=%s | Queue "
-                "Depth Before: %u/%u\n",
-                blk.seq, p->mode, leadsOff ? "TRUE" : "FALSE",
-                (unsigned)queuedBefore, (unsigned)UPLOAD_QUEUE_DEPTH);
-
   xQueueSend(s_uploadQueue, &p, 0);
-
   UBaseType_t queuedAfter = uxQueueMessagesWaiting(s_uploadQueue);
-  Serial.printf("[NET QUEUE] Enqueued block seq=%u successfully -> Queue "
-                "count: %u/%u\n",
-                blk.seq, (unsigned)queuedAfter, (unsigned)UPLOAD_QUEUE_DEPTH);
+
+  uint32_t filledBytes = (uint32_t)queuedAfter * sizeof(CompressedPayload);
+  uint32_t totalPoolBytes = UPLOAD_QUEUE_DEPTH * sizeof(CompressedPayload);
+  uint32_t freeDram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  uint32_t freePsram = (uint32_t)ESP.getFreePsram();
+
+  Serial.printf("[NET QUEUE] Enqueued seq=%u | LO=%s | Queue: %u/%u | Pool: %u / %u bytes | Free DRAM: %u bytes | Free PSRAM: %u bytes\n",
+                blk.seq, leadsOff ? "TRUE" : "FALSE",
+                (unsigned)queuedAfter, (unsigned)UPLOAD_QUEUE_DEPTH,
+                filledBytes, totalPoolBytes,
+                freeDram, freePsram);
   return true;
 }
 
@@ -1087,8 +1088,14 @@ static void uploadTask(void *pv)
       {
         lastNoWifiLog = millis();
         UBaseType_t queued = s_uploadQueue ? uxQueueMessagesWaiting(s_uploadQueue) : 0;
-        Serial.printf("[NET QUEUE] Wi-Fi offline. Buffering data in PSRAM: %u/%u blocks (~%.1f min)\n",
-                      (unsigned)queued, (unsigned)UPLOAD_QUEUE_DEPTH, (float)queued / 60.0f);
+        uint32_t filledBytes = (uint32_t)queued * sizeof(CompressedPayload);
+        uint32_t totalPoolBytes = UPLOAD_QUEUE_DEPTH * sizeof(CompressedPayload);
+        uint32_t freeDram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        uint32_t freePsram = (uint32_t)ESP.getFreePsram();
+        Serial.printf("[NET QUEUE] Wi-Fi offline | Queue: %u/%u | Pool: %u / %u bytes | Free DRAM: %u bytes | Free PSRAM: %u bytes\n",
+                      (unsigned)queued, (unsigned)UPLOAD_QUEUE_DEPTH,
+                      filledBytes, totalPoolBytes,
+                      freeDram, freePsram);
       }
       vTaskDelay(100 / portTICK_PERIOD_MS);
       continue;
@@ -1157,10 +1164,16 @@ static void uploadTask(void *pv)
           uint32_t elapsed = millis() - t0;
           UBaseType_t remaining =
               s_uploadQueue ? uxQueueMessagesWaiting(s_uploadQueue) : 0;
-          Serial.printf("[WS STREAM] Sent seq=%u (%u ms, %u bytes) | Queue "
-                        "remaining: %u/%u\n",
+          uint32_t filledBytes = (uint32_t)remaining * sizeof(CompressedPayload);
+          uint32_t totalPoolBytes = UPLOAD_QUEUE_DEPTH * sizeof(CompressedPayload);
+          uint32_t freeDram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+          uint32_t freePsram = (uint32_t)ESP.getFreePsram();
+
+          Serial.printf("[WS STREAM] Sent seq=%u (%u ms, %u bytes) | Queue: %u/%u | Pool: %u / %u bytes | Free DRAM: %u bytes | Free PSRAM: %u bytes\n",
                         (unsigned)p->seq, (unsigned)elapsed, (unsigned)len,
-                        (unsigned)remaining, (unsigned)UPLOAD_QUEUE_DEPTH);
+                        (unsigned)remaining, (unsigned)UPLOAD_QUEUE_DEPTH,
+                        filledBytes, totalPoolBytes,
+                        freeDram, freePsram);
           // Yield 10ms after a successful transmission to allow TCP ACKs to clear smoothly
           vTaskDelay(10 / portTICK_PERIOD_MS);
         }
