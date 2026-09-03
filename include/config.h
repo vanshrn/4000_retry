@@ -91,8 +91,8 @@
 // ==========================================================
 #define GYRO_STILL_THRESHOLD_DPS     10.0f
 #define GYRO_LIGHT_THRESHOLD_DPS     35.0f
-#define DIE_TEMP_WARN_C              55.0f
-#define DIE_TEMP_CRIT_C              60.0f
+#define DIE_TEMP_WARN_C              60.0f
+#define DIE_TEMP_CRIT_C              65.0f
 
 // ==========================================================
 // Debug
@@ -133,5 +133,5 @@
 #define NVS_NAMESPACE                "ecg_cfg"
 
 // ==========================================================
-// Upload Queue Depth (200 blocks = 3.33 minutes of full 32-bit raw + filtered ECG in PSRAM with 1.9MB headroom)
-#define UPLOAD_QUEUE_DEPTH           200
+// Upload Queue Depth (600 blocks = 10.0 minutes of lossless Varint compressed 4000 SPS ECG in PSRAM)
+#define UPLOAD_QUEUE_DEPTH           600

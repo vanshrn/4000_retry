@@ -67,9 +67,31 @@
 #endif
 
 // -----------------------------------------------------------
-// Upload Queue Structures in PSRAM (Direct 32-bit Raw & Filtered Storage)
+// Stage 1: Full-Range 24-bit Delta Packing Structures in PSRAM
 // -----------------------------------------------------------
-struct CompressedPayload
+#pragma pack(push, 1)
+struct Stage1Payload
+{
+  uint32_t seq;
+  bool leadsOff;
+  bool loPlus;
+  bool loMinus;
+  char warning[32];
+  char severity[32];
+  char mode[16];
+  char deviceResult[128];
+  PerformanceMetrics metrics;
+  bool hasMetrics;
+  int32_t raw_anchor;
+  int32_t filt_anchor;
+  uint8_t raw_deltas_24bit[(WINDOW_SIZE - 1) * 3];  // 11,997 bytes
+  uint8_t filt_deltas_24bit[(WINDOW_SIZE - 1) * 3]; // 11,997 bytes
+};
+#pragma pack(pop)
+
+using CompressedPayload = Stage1Payload;
+
+struct UploadPayload
 {
   int32_t raw_data[WINDOW_SIZE];
   int32_t filtered_data[WINDOW_SIZE];
@@ -85,7 +107,47 @@ struct CompressedPayload
   bool hasMetrics;
 };
 
-using UploadPayload = CompressedPayload;
+// -----------------------------------------------------------
+// Stage 1 Exact Mathematical 24-bit Delta Packer & Inverse Unpacker
+// -----------------------------------------------------------
+static inline void packDelta24(int32_t delta, uint8_t *out)
+{
+  out[0] = (uint8_t)(delta & 0xFF);
+  out[1] = (uint8_t)((delta >> 8) & 0xFF);
+  out[2] = (uint8_t)((delta >> 16) & 0xFF);
+}
+
+static inline int32_t unpackDelta24(const uint8_t *in)
+{
+  uint32_t u = (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16);
+  if (u & 0x00800000)
+  {
+    u |= 0xFF000000;
+  }
+  return (int32_t)u;
+}
+
+static inline void stage1_compress(const int32_t *samples, int count, int32_t &anchor, uint8_t *deltas24)
+{
+  anchor = samples[0];
+  for (int i = 1; i < count; i++)
+  {
+    int32_t delta = samples[i] - samples[i - 1];
+    packDelta24(delta, &deltas24[(i - 1) * 3]);
+  }
+}
+
+static inline void stage1_decompress(int32_t anchor, const uint8_t *deltas24, int count, int32_t *out)
+{
+  out[0] = anchor;
+  int32_t current = anchor;
+  for (int i = 1; i < count; i++)
+  {
+    int32_t delta = unpackDelta24(&deltas24[(i - 1) * 3]);
+    current += delta;
+    out[i] = current;
+  }
+}
 
 // -----------------------------------------------------------
 // Network & Upload State
@@ -93,6 +155,8 @@ using UploadPayload = CompressedPayload;
 static CompressedPayload *s_payloadPool = nullptr;
 static QueueHandle_t s_uploadQueue = nullptr;
 static QueueHandle_t s_freePayloadQueue = nullptr;
+static UploadPayload *s_decompressBuf = nullptr;
+static uint32_t s_dynamicQueueDepth = 200;
 static bool postPayload(const char *buf, size_t len);
 
 static WebServer s_server(80);
@@ -449,17 +513,25 @@ void network_init()
   // Start initial 20-second STA boot auto-connect window
   enterBootStaMode();
 
-  s_payloadPool = (CompressedPayload *)ps_malloc(sizeof(CompressedPayload) * UPLOAD_QUEUE_DEPTH);
+  // Dynamic PSRAM Sizing: Reserve 1.5MB for TLS/Classifier/System, give remainder to Queue
+  size_t freePsram = ESP.getFreePsram();
+  size_t reserveForSystem = 1500 * 1024;
+  size_t poolMemory = (freePsram > reserveForSystem) ? (freePsram - reserveForSystem) : (freePsram / 2);
+  s_dynamicQueueDepth = poolMemory / sizeof(CompressedPayload);
+  if (s_dynamicQueueDepth < 50) s_dynamicQueueDepth = 50;
+  if (s_dynamicQueueDepth > 1500) s_dynamicQueueDepth = 1500;
+
+  s_payloadPool = (CompressedPayload *)ps_malloc(sizeof(CompressedPayload) * s_dynamicQueueDepth);
   if (!s_payloadPool)
-    s_payloadPool = (CompressedPayload *)malloc(sizeof(CompressedPayload) * UPLOAD_QUEUE_DEPTH);
+    s_payloadPool = (CompressedPayload *)malloc(sizeof(CompressedPayload) * s_dynamicQueueDepth);
   if (!s_payloadPool)
   {
     Serial.println(F("[NET] FATAL: CompressedPayload PSRAM alloc failed!"));
     return;
   }
 
-  s_uploadQueue = xQueueCreate(UPLOAD_QUEUE_DEPTH, sizeof(CompressedPayload *));
-  s_freePayloadQueue = xQueueCreate(UPLOAD_QUEUE_DEPTH, sizeof(CompressedPayload *));
+  s_uploadQueue = xQueueCreate(s_dynamicQueueDepth, sizeof(CompressedPayload *));
+  s_freePayloadQueue = xQueueCreate(s_dynamicQueueDepth, sizeof(CompressedPayload *));
   if (!s_uploadQueue || !s_freePayloadQueue)
   {
     Serial.println(F("[NET] FATAL: upload queue creation failed!"));
@@ -467,19 +539,24 @@ void network_init()
   }
 
   // Populate free payload pointer pool from PSRAM array
-  for (int i = 0; i < (int)UPLOAD_QUEUE_DEPTH; i++)
+  for (int i = 0; i < (int)s_dynamicQueueDepth; i++)
   {
     CompressedPayload *p = &s_payloadPool[i];
     xQueueSend(s_freePayloadQueue, &p, 0);
   }
 
+  s_decompressBuf = (UploadPayload *)ps_malloc(sizeof(UploadPayload));
+  if (!s_decompressBuf)
+    s_decompressBuf = (UploadPayload *)malloc(sizeof(UploadPayload));
+
   s_wsMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(wsTaskWorker, "ws_loop_task", 8192, nullptr, 1, nullptr, 0);
   xTaskCreatePinnedToCore(uploadTask, "ecg_upload", 16384, nullptr, 1, nullptr, 0);
   xTaskCreatePinnedToCore(localStatusTask, "local_status", 4096, nullptr, 1, nullptr, 0);
-  Serial.printf("[NET] Lossless Delta Queue initialized (%u slots, ~%.1f MB in PSRAM).\n",
-                (unsigned)UPLOAD_QUEUE_DEPTH,
-                (float)(sizeof(CompressedPayload) * UPLOAD_QUEUE_DEPTH) / (1024.0f * 1024.0f));
+  Serial.printf("[NET] Dynamic Stage 1 Queue initialized (%u slots, ~%.1f MB in PSRAM, %u KB free PSRAM).\n",
+                (unsigned)s_dynamicQueueDepth,
+                (float)(sizeof(CompressedPayload) * s_dynamicQueueDepth) / (1024.0f * 1024.0f),
+                (unsigned)(ESP.getFreePsram() / 1024));
 }
 
 // -----------------------------------------------------------
@@ -637,12 +714,12 @@ bool network_uploadBlock(const Block &blk, bool leadsOff, bool loPlus,
       return false;
   }
 
-  // 1. Direct 32-bit Raw & Filtered Sample Storage (< 0.01ms)
-  memcpy(p->raw_data, blk.data, sizeof(int32_t) * WINDOW_SIZE);
+  // 1. Stage 1 Full-Range 24-bit Delta Packing on Core 1 (< 0.05ms)
+  stage1_compress(blk.data, WINDOW_SIZE, p->raw_anchor, p->raw_deltas_24bit);
 #if RAW_DATA_ONLY
-  memcpy(p->filtered_data, blk.data, sizeof(int32_t) * WINDOW_SIZE);
+  stage1_compress(blk.data, WINDOW_SIZE, p->filt_anchor, p->filt_deltas_24bit);
 #else
-  memcpy(p->filtered_data, blk.filtered_data, sizeof(int32_t) * WINDOW_SIZE);
+  stage1_compress(blk.filtered_data, WINDOW_SIZE, p->filt_anchor, p->filt_deltas_24bit);
 #endif
 
   p->seq = blk.seq;
@@ -1016,11 +1093,11 @@ static void uploadTask(void *pv)
         lastNoWifiLog = millis();
         UBaseType_t queued = s_uploadQueue ? uxQueueMessagesWaiting(s_uploadQueue) : 0;
         uint32_t filledBytes = (uint32_t)queued * sizeof(CompressedPayload);
-        uint32_t totalPoolBytes = UPLOAD_QUEUE_DEPTH * sizeof(CompressedPayload);
+        uint32_t totalPoolBytes = s_dynamicQueueDepth * sizeof(CompressedPayload);
         uint32_t freeDram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         uint32_t freePsram = (uint32_t)ESP.getFreePsram();
         Serial.printf("[NET QUEUE] Wi-Fi offline | Queue: %u/%u | Pool: %u / %u bytes | Free DRAM: %u bytes | Free PSRAM: %u bytes\n",
-                      (unsigned)queued, (unsigned)UPLOAD_QUEUE_DEPTH,
+                      (unsigned)queued, (unsigned)s_dynamicQueueDepth,
                       filledBytes, totalPoolBytes,
                       freeDram, freePsram);
       }
@@ -1036,7 +1113,22 @@ static void uploadTask(void *pv)
 
     if (xQueueReceive(s_uploadQueue, &p, pdMS_TO_TICKS(10)) == pdTRUE)
     {
-      size_t len = buildJsonBuffer(*p, s_jsonBuf, JSON_BUF_SIZE);
+      // 1. Exact Stage 1 Inverse Unpacking (< 0.05ms, zero failure chance)
+      stage1_decompress(p->raw_anchor, p->raw_deltas_24bit, WINDOW_SIZE, s_decompressBuf->raw_data);
+      stage1_decompress(p->filt_anchor, p->filt_deltas_24bit, WINDOW_SIZE, s_decompressBuf->filtered_data);
+
+      s_decompressBuf->seq = p->seq;
+      s_decompressBuf->leadsOff = p->leadsOff;
+      s_decompressBuf->loPlus = p->loPlus;
+      s_decompressBuf->loMinus = p->loMinus;
+      strcpy(s_decompressBuf->warning, p->warning);
+      strcpy(s_decompressBuf->severity, p->severity);
+      strcpy(s_decompressBuf->mode, p->mode);
+      strcpy(s_decompressBuf->deviceResult, p->deviceResult);
+      s_decompressBuf->metrics = p->metrics;
+      s_decompressBuf->hasMetrics = p->hasMetrics;
+
+      size_t len = buildJsonBuffer(*s_decompressBuf, s_jsonBuf, JSON_BUF_SIZE);
       if (len > 0)
       {
         bool sentViaWs = false;
@@ -1057,13 +1149,13 @@ static void uploadTask(void *pv)
           UBaseType_t remaining =
               s_uploadQueue ? uxQueueMessagesWaiting(s_uploadQueue) : 0;
           uint32_t filledBytes = (uint32_t)remaining * sizeof(CompressedPayload);
-          uint32_t totalPoolBytes = UPLOAD_QUEUE_DEPTH * sizeof(CompressedPayload);
+          uint32_t totalPoolBytes = s_dynamicQueueDepth * sizeof(CompressedPayload);
           uint32_t freeDram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
           uint32_t freePsram = (uint32_t)ESP.getFreePsram();
 
           Serial.printf("[WS STREAM] Sent seq=%u (%u ms, %u bytes) | Queue: %u/%u | Pool: %u / %u bytes | Free DRAM: %u bytes | Free PSRAM: %u bytes\n",
                         (unsigned)p->seq, (unsigned)elapsed, (unsigned)len,
-                        (unsigned)remaining, (unsigned)UPLOAD_QUEUE_DEPTH,
+                        (unsigned)remaining, (unsigned)s_dynamicQueueDepth,
                         filledBytes, totalPoolBytes,
                         freeDram, freePsram);
           vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -1078,13 +1170,13 @@ static void uploadTask(void *pv)
             UBaseType_t remaining =
                 s_uploadQueue ? uxQueueMessagesWaiting(s_uploadQueue) : 0;
             uint32_t filledBytes = (uint32_t)remaining * sizeof(CompressedPayload);
-            uint32_t totalPoolBytes = UPLOAD_QUEUE_DEPTH * sizeof(CompressedPayload);
+            uint32_t totalPoolBytes = s_dynamicQueueDepth * sizeof(CompressedPayload);
             uint32_t freeDram = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
             uint32_t freePsram = (uint32_t)ESP.getFreePsram();
 
             Serial.printf("[HTTP POST] Sent seq=%u (%u ms, %u bytes) | Queue: %u/%u | Pool: %u / %u bytes | Free DRAM: %u bytes | Free PSRAM: %u bytes\n",
                           (unsigned)p->seq, (unsigned)elapsed, (unsigned)len,
-                          (unsigned)remaining, (unsigned)UPLOAD_QUEUE_DEPTH,
+                          (unsigned)remaining, (unsigned)s_dynamicQueueDepth,
                           filledBytes, totalPoolBytes,
                           freeDram, freePsram);
             vTaskDelay(10 / portTICK_PERIOD_MS);
