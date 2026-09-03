@@ -91,8 +91,8 @@
 // ==========================================================
 #define GYRO_STILL_THRESHOLD_DPS     10.0f
 #define GYRO_LIGHT_THRESHOLD_DPS     35.0f
-#define DIE_TEMP_WARN_C              50.0f
-#define DIE_TEMP_CRIT_C              55.0f
+#define DIE_TEMP_WARN_C              55.0f
+#define DIE_TEMP_CRIT_C              60.0f
 
 // ==========================================================
 // Debug
