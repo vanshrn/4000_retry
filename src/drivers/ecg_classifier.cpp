@@ -49,6 +49,8 @@ String validationDetailText(const String& reason) {
 // detectPeaks — polarity-agnostic R-peak finder
 // ==========================================================
 int detectPeaks(const int32_t* samples, int sampleCount, int* peaks, int maxPeaks, float& maxAbs) {
+  if (sampleCount < 10) return 0;
+
   if (!analysisCentered) {
     analysisCentered = (float *)ps_malloc(sizeof(float) * ANALYSIS_WINDOW_SIZE);
     if (!analysisCentered) analysisCentered = (float *)malloc(sizeof(float) * ANALYSIS_WINDOW_SIZE);
@@ -62,34 +64,80 @@ int detectPeaks(const int32_t* samples, int sampleCount, int* peaks, int maxPeak
   float mean = (float)sum / (float)sampleCount;
   maxAbs = 0.0f;
   for (int i = 0; i < sampleCount; i++) {
-    if (analysisCentered) analysisCentered[i] = (float)samples[i] - mean;
-    float absVal = fabs((float)samples[i] - mean);
+    float val = (float)samples[i] - mean;
+    if (analysisCentered) analysisCentered[i] = val;
+    float absVal = fabs(val);
     if (absVal > maxAbs) maxAbs = absVal;
   }
 
   if (maxAbs < 30.0f) return 0;
-  float threshold = maxAbs * 0.50f;
+
+  // 1. Five-point derivative slope dV/dt (Pan-Tompkins)
+  static float *mwi = nullptr;
+  if (!mwi) {
+    mwi = (float *)ps_malloc(sizeof(float) * ANALYSIS_WINDOW_SIZE);
+    if (!mwi) mwi = (float *)malloc(sizeof(float) * ANALYSIS_WINDOW_SIZE);
+  }
+  if (!mwi) return 0;
+
+  for (int i = 2; i < sampleCount - 2; i++) {
+    float d = (2.0f * analysisCentered[i + 2] + analysisCentered[i + 1] - analysisCentered[i - 1] - 2.0f * analysisCentered[i - 2]) / 8.0f;
+    mwi[i] = d * d;
+  }
+  mwi[0] = mwi[1] = mwi[2];
+  mwi[sampleCount - 2] = mwi[sampleCount - 1] = mwi[sampleCount - 3];
+
+  // 2. Moving Window Integration (90ms window = 360 samples @ 4000 SPS)
+  int mwiWindow = (int)(0.09f * SAMPLE_RATE);
+  if (mwiWindow < 4) mwiWindow = 4;
+  int halfW = mwiWindow / 2;
+  double currentMwiSum = 0.0;
+  for (int j = 0; j < halfW && j < sampleCount; j++) {
+    currentMwiSum += mwi[j];
+  }
+  for (int i = 0; i < sampleCount; i++) {
+    int lead = i + halfW;
+    int lag = i - halfW - 1;
+    if (lead < sampleCount) currentMwiSum += mwi[lead];
+    if (lag >= 0) currentMwiSum -= mwi[lag];
+    analysisCentered[i] = (float)(currentMwiSum / (double)mwiWindow);
+  }
+
+  // 3. Adaptive Threshold with Search-back
+  float maxMwi = 0.0f;
+  for (int i = 0; i < sampleCount; i++) {
+    if (analysisCentered[i] > maxMwi) maxMwi = analysisCentered[i];
+  }
+
+  float threshold1 = maxMwi * 0.20f; // Primary adaptive threshold
   int peakCount = 0;
-  int minDistance = SAMPLE_RATE / 4;
+  int minDistance = SAMPLE_RATE / 4; // 250ms refractory period (max 240 BPM)
   int lastPeak = -minDistance;
 
-  // Polarity-agnostic: QRS direction depends on lead vector vs. an
-  // individual's cardiac axis, so the same electrode placement can be
-  // upright on one person and inverted on another (both are normal).
   for (int i = 1; i < sampleCount - 1; i++) {
     float v = analysisCentered[i];
-    float av = fabs(v);
-    if (av < threshold) continue;
+    if (v < threshold1) continue;
 
-    bool isLocalExtreme = (v > 0.0f)
-      ? (v >= analysisCentered[i - 1] && v > analysisCentered[i + 1])
-      : (v <= analysisCentered[i - 1] && v < analysisCentered[i + 1]);
-    if (!isLocalExtreme) continue;
-    if ((i - lastPeak) < minDistance) continue;
-
-    if (peakCount < maxPeaks) {
-      peaks[peakCount++] = i;
-      lastPeak = i;
+    if (v >= analysisCentered[i - 1] && v > analysisCentered[i + 1]) {
+      if ((i - lastPeak) >= minDistance) {
+        // Refine exact R-peak location on raw centered signal within ±40ms
+        int searchRadius = (int)(0.04f * SAMPLE_RATE);
+        int rStart = max(0, i - searchRadius);
+        int rEnd = min(sampleCount - 1, i + searchRadius);
+        int bestR = i;
+        float bestVal = 0.0f;
+        for (int k = rStart; k <= rEnd; k++) {
+          float sampleVal = fabs((float)samples[k] - mean);
+          if (sampleVal > bestVal) {
+            bestVal = sampleVal;
+            bestR = k;
+          }
+        }
+        if (peakCount < maxPeaks) {
+          peaks[peakCount++] = bestR;
+          lastPeak = bestR;
+        }
+      }
     }
   }
 

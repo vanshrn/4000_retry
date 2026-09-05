@@ -34,8 +34,8 @@ from scipy.ndimage import uniform_filter1d, median_filter
 API_URL        = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123'
 API_RESULT_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/device_result'
 
-# Display window: 2.0 second scrolling view at 4000 SPS (8000 points)
-WINDOW_SIZE   = 8000      # 2.0 s × 4000 SPS (8000 points)
+# Display window: 4.0 second scrolling view at 4000 SPS (16000 points)
+WINDOW_SIZE   = 16000     # 4.0 s × 4000 SPS (16000 points)
 SAMPLING_RATE = 4000      # ADS1292R sample rate
 
 # ADS1292R ADC clipping limits (24-bit signed, gain=6, VREF=2.42V)

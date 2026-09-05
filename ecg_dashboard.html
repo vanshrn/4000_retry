@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -150,6 +150,72 @@
       border: 1px solid var(--border);
       border-radius: 6px;
     }
+    .timeline-container {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .timeline-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .timeline-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      flex-wrap: wrap;
+    }
+    .slider-wrapper {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 250px;
+    }
+    input[type=range] {
+      flex: 1;
+      accent-color: var(--accent);
+      cursor: pointer;
+      height: 6px;
+    }
+    .live-badge {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: bold;
+      background: rgba(63, 185, 80, 0.2);
+      color: var(--green);
+      border: 1px solid var(--green);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .live-badge.history-mode {
+      background: rgba(210, 153, 34, 0.2);
+      color: var(--yellow);
+      border: 1px solid var(--yellow);
+    }
+    .time-display {
+      font-size: 12px;
+      color: var(--text-dim);
+      font-family: monospace;
+    }
+    .select-sm {
+      background: #21262d;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -195,6 +261,36 @@
     <div class="stat-card">
       <div class="stat-label">Lead Status</div>
       <div id="statLead" class="stat-val" style="color: var(--green);">OK</div>
+    </div>
+  </div>
+
+  <!-- Interactive Timeline Navigation & Beat Analyzer Scrubber -->
+  <div class="timeline-container">
+    <div class="timeline-header">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 13px; font-weight: bold;">⏪ Beat Navigation & Historical Waveform Scrubber</span>
+        <span id="liveIndicator" class="live-badge" title="Click to snap back to LIVE real-time stream">🔴 LIVE</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span class="time-display" id="scrubTimeInfo">Position: LIVE (Latest)</span>
+        <label style="font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px;">
+          Window:
+          <select id="windowSizeSelect" class="select-sm">
+            <option value="4000">1.0 sec (4k pts)</option>
+            <option value="8000" selected>2.0 sec (8k pts)</option>
+            <option value="16000">4.0 sec (16k pts)</option>
+            <option value="32000">8.0 sec (32k pts)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div class="timeline-controls">
+      <button id="stepBackBtn" class="btn btn-secondary" style="padding: 4px 10px;" title="Step backward 0.5s">◀ 0.5s</button>
+      <div class="slider-wrapper">
+        <input type="range" id="timelineSlider" min="0" max="1000" value="1000" step="1">
+      </div>
+      <button id="stepFwdBtn" class="btn btn-secondary" style="padding: 4px 10px;" title="Step forward 0.5s">0.5s ▶</button>
+      <button id="snapLiveBtn" class="btn btn-secondary" style="padding: 4px 12px;">⏩ Jump to Live</button>
     </div>
   </div>
 
@@ -253,23 +349,35 @@
 
   <script>
     const SSE_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123';
-    const MAX_POINTS = 8000;
     const DOWNSAMPLE = 4;
+    const MAX_HISTORY_POINTS = 400000; // 100 seconds of continuous 4000 SPS data in memory
 
-    let rawBuffer = [];
-    let filtBuffer = [];
+    let historyRaw = [];
+    let historyFilt = [];
+    let historySeqList = [];
+    let historyTimeList = [];
+
     let totalBlocks = 0;
     let isPaused = false;
-    let isRecording = true; // Auto-records incoming blocks
-    let showFullJson = true; // Shows complete raw sample arrays
+    let isRecording = true;
+    let showFullJson = false;
     let lastFullPayload = null;
     let recordedSession = [];
     let evtSource = null;
+
+    let isLiveMode = true;
+    let displayWindowSize = 8000; // 2 seconds default @ 4000 SPS
+    let scrubIndex = 0; // Index in history buffer for right-edge or center of display window
 
     const rawCanvas = document.getElementById('rawCanvas');
     const filtCanvas = document.getElementById('filtCanvas');
     const rawCtx = rawCanvas.getContext('2d');
     const filtCtx = filtCanvas.getContext('2d');
+
+    const timelineSlider = document.getElementById('timelineSlider');
+    const liveIndicator = document.getElementById('liveIndicator');
+    const scrubTimeInfo = document.getElementById('scrubTimeInfo');
+    const windowSizeSelect = document.getElementById('windowSizeSelect');
 
     function resizeCanvas() {
       rawCanvas.width = rawCanvas.clientWidth * window.devicePixelRatio;
@@ -279,6 +387,91 @@
     }
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
+
+    function setLiveMode(live) {
+      isLiveMode = live;
+      if (isLiveMode) {
+        liveIndicator.textContent = '🔴 LIVE';
+        liveIndicator.className = 'live-badge';
+        scrubTimeInfo.textContent = 'Position: LIVE (Real-time)';
+        timelineSlider.value = timelineSlider.max;
+      } else {
+        liveIndicator.textContent = '⏸️ HISTORICAL';
+        liveIndicator.className = 'live-badge history-mode';
+        updateScrubInfo();
+      }
+    }
+
+    function updateScrubInfo() {
+      if (historyFilt.length === 0) return;
+      const totalPts = historyFilt.length;
+      const currentPt = Math.min(scrubIndex, totalPts);
+      const ptsFromEnd = totalPts - currentPt;
+      const secondsAgo = (ptsFromEnd / 4000).toFixed(2);
+      
+      const blockIdx = Math.floor(currentPt / 4000);
+      const seqNum = historySeqList[blockIdx] !== undefined ? historySeqList[blockIdx] : '—';
+      const timeStr = historyTimeList[blockIdx] || '';
+
+      scrubTimeInfo.textContent = `-${secondsAgo}s ago | Block #${seqNum} ${timeStr ? `(${timeStr})` : ''}`;
+    }
+
+    timelineSlider.addEventListener('input', function() {
+      const val = parseInt(this.value);
+      const maxVal = parseInt(this.max);
+      if (val >= maxVal) {
+        setLiveMode(true);
+      } else {
+        setLiveMode(false);
+        const totalPts = historyFilt.length;
+        scrubIndex = Math.floor((val / maxVal) * totalPts);
+        if (scrubIndex < displayWindowSize) scrubIndex = displayWindowSize;
+        updateScrubInfo();
+      }
+    });
+
+    document.getElementById('stepBackBtn').addEventListener('click', () => {
+      setLiveMode(false);
+      const stepPts = 2000; // 0.5 sec @ 4000 SPS
+      scrubIndex = Math.max(displayWindowSize, (isLiveMode ? historyFilt.length : scrubIndex) - stepPts);
+      timelineSlider.value = Math.floor((scrubIndex / Math.max(historyFilt.length, 1)) * parseInt(timelineSlider.max));
+      updateScrubInfo();
+    });
+
+    document.getElementById('stepFwdBtn').addEventListener('click', () => {
+      if (isLiveMode) return;
+      const stepPts = 2000;
+      scrubIndex += stepPts;
+      if (scrubIndex >= historyFilt.length) {
+        setLiveMode(true);
+      } else {
+        timelineSlider.value = Math.floor((scrubIndex / historyFilt.length) * parseInt(timelineSlider.max));
+        updateScrubInfo();
+      }
+    });
+
+    document.getElementById('snapLiveBtn').addEventListener('click', () => setLiveMode(true));
+    liveIndicator.addEventListener('click', () => setLiveMode(true));
+
+    windowSizeSelect.addEventListener('change', function() {
+      displayWindowSize = parseInt(this.value);
+    });
+
+    // Mouse wheel scrub/zoom on canvas
+    function handleCanvasWheel(e) {
+      e.preventDefault();
+      setLiveMode(false);
+      const delta = e.deltaY > 0 ? -2000 : 2000; // 0.5 sec steps
+      scrubIndex = Math.min(historyFilt.length, Math.max(displayWindowSize, (isLiveMode ? historyFilt.length : scrubIndex) + delta));
+      if (scrubIndex >= historyFilt.length) {
+        setLiveMode(true);
+      } else {
+        timelineSlider.value = Math.floor((scrubIndex / historyFilt.length) * parseInt(timelineSlider.max));
+        updateScrubInfo();
+      }
+    }
+    rawCanvas.addEventListener('wheel', handleCanvasWheel);
+    filtCanvas.addEventListener('wheel', handleCanvasWheel);
 
     function updateJsonDisplay() {
       if (!lastFullPayload) return;
@@ -328,10 +521,19 @@
       tr.addEventListener('click', () => {
         lastFullPayload = rec;
         updateJsonDisplay();
+        // Jump timeline directly to this block
+        const targetSeq = rec.seq;
+        const foundBlockIdx = historySeqList.indexOf(targetSeq);
+        if (foundBlockIdx !== -1) {
+          setLiveMode(false);
+          scrubIndex = Math.min(historyFilt.length, (foundBlockIdx + 1) * 4000);
+          timelineSlider.value = Math.floor((scrubIndex / historyFilt.length) * parseInt(timelineSlider.max));
+          updateScrubInfo();
+        }
       });
 
       tbody.insertBefore(tr, tbody.firstChild);
-      if (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+      if (tbody.children.length > 100) tbody.removeChild(tbody.lastChild);
     }
 
     function connectSSE() {
@@ -358,6 +560,10 @@
           totalBlocks++;
           lastFullPayload = payload;
           updateJsonDisplay();
+
+          const nowTimeStr = new Date().toLocaleTimeString();
+          historySeqList.push(rec.seq || totalBlocks);
+          historyTimeList.push(nowTimeStr);
 
           if (isRecording) {
             recordedSession.push(payload);
@@ -388,16 +594,27 @@
           for (let i = 0; i < samples.length; i++) {
             const s = samples[i];
             if (Array.isArray(s) && s.length >= 2) {
-              rawBuffer.push(s[0]);
-              filtBuffer.push(s[1]);
+              historyRaw.push(s[0]);
+              historyFilt.push(s[1]);
             } else {
-              rawBuffer.push(s);
-              filtBuffer.push(s);
+              historyRaw.push(s);
+              historyFilt.push(s);
             }
           }
 
-          while (rawBuffer.length > MAX_POINTS) rawBuffer.shift();
-          while (filtBuffer.length > MAX_POINTS) filtBuffer.shift();
+          // Bound history buffer
+          while (historyRaw.length > MAX_HISTORY_POINTS) {
+            historyRaw.shift();
+            historyFilt.shift();
+          }
+          while (historySeqList.length > (MAX_HISTORY_POINTS / 4000)) {
+            historySeqList.shift();
+            historyTimeList.shift();
+          }
+
+          if (isLiveMode) {
+            scrubIndex = historyFilt.length;
+          }
 
         } catch (e) {
           console.error("Parse error:", e);
@@ -410,11 +627,12 @@
       };
     }
 
-    function renderPlot(ctx, data, color, rangeElId) {
+    function renderSlice(ctx, fullData, color, rangeElId) {
       const w = ctx.canvas.width;
       const h = ctx.canvas.height;
       ctx.clearRect(0, 0, w, h);
 
+      // Grid
       ctx.strokeStyle = '#1c232d';
       ctx.lineWidth = 1;
       for (let y = 0; y < h; y += h / 5) {
@@ -424,14 +642,18 @@
         ctx.stroke();
       }
 
-      if (data.length < 2) return;
+      if (fullData.length < 2) return;
 
-      const step = DOWNSAMPLE;
-      const len = Math.floor(data.length / step);
+      const endIdx = isLiveMode ? fullData.length : Math.min(scrubIndex, fullData.length);
+      const startIdx = Math.max(0, endIdx - displayWindowSize);
+      const slice = fullData.slice(startIdx, endIdx);
+
+      if (slice.length < 2) return;
+
+      // Find global min and max of the full slice for accurate Y scaling
       let min = Infinity, max = -Infinity;
-
-      for (let i = 0; i < data.length; i += step) {
-        const v = data[i];
+      for (let i = 0; i < slice.length; i++) {
+        const v = slice[i];
         if (v < min) min = v;
         if (v > max) max = v;
       }
@@ -444,23 +666,54 @@
       document.getElementById(rangeElId).textContent = `Min: ${Math.round(min)} | Max: ${Math.round(max)} | P-P: ${Math.round(max - min)}`;
 
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2 * window.devicePixelRatio;
+      ctx.lineWidth = 1.8 * window.devicePixelRatio;
       ctx.beginPath();
 
-      const dx = w / len;
-      for (let i = 0; i < len; i++) {
-        const x = i * dx;
-        const norm = (data[i * step] - yMin) / yRange;
-        const y = h - (norm * h);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+      // Peak-Preserving Min-Max Decimation across screen pixels
+      // Each horizontal pixel column inspects all samples in its bin to preserve sharp R-peaks
+      const numBins = Math.min(Math.floor(w), slice.length);
+      const samplesPerBin = slice.length / numBins;
+
+      for (let bin = 0; bin < numBins; bin++) {
+        const bStart = Math.floor(bin * samplesPerBin);
+        const bEnd = Math.min(slice.length, Math.floor((bin + 1) * samplesPerBin));
+        
+        let binMin = slice[bStart];
+        let binMax = slice[bStart];
+        let firstVal = slice[bStart];
+        let lastVal = slice[bEnd > bStart ? bEnd - 1 : bStart];
+
+        for (let j = bStart; j < bEnd; j++) {
+          const val = slice[j];
+          if (val < binMin) binMin = val;
+          if (val > binMax) binMax = val;
+        }
+
+        const x = (bin / numBins) * w;
+        const yMinPx = h - ((binMin - yMin) / yRange) * h;
+        const yMaxPx = h - ((binMax - yMin) / yRange) * h;
+        const yFirstPx = h - ((firstVal - yMin) / yRange) * h;
+        const yLastPx = h - ((lastVal - yMin) / yRange) * h;
+
+        if (bin === 0) {
+          ctx.moveTo(x, yFirstPx);
+        } else {
+          ctx.lineTo(x, yFirstPx);
+        }
+
+        if (bEnd - bStart > 1) {
+          // Draw the full min-to-max envelope in this pixel column to guarantee sharp R-peaks
+          ctx.lineTo(x, yMaxPx);
+          ctx.lineTo(x, yMinPx);
+          ctx.lineTo(x, yLastPx);
+        }
       }
       ctx.stroke();
     }
 
     function animLoop() {
-      renderPlot(rawCtx, rawBuffer, '#f78166', 'rawRange');
-      renderPlot(filtCtx, filtBuffer, '#3fb950', 'filtRange');
+      renderSlice(rawCtx, historyRaw, '#f78166', 'rawRange');
+      renderSlice(filtCtx, historyFilt, '#3fb950', 'filtRange');
       requestAnimationFrame(animLoop);
     }
 

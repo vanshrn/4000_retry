@@ -450,11 +450,10 @@ static void processBlock()
     g_lastAlertCondition = "";
   }
 
-  // 4. Apply Calibration-Range-Based Motion Noise Reduction on filtered_data
-  // (for Wi-Fi / DB)
-  if (g_motionCalibration)
-    g_motionCalibration->applyMotionNoiseReduction(
-        blk.filtered_data, blk.sampleValid, WINDOW_SIZE, seq);
+  // 4. Motion calibration diagnostic update (bypassed on filtered_data to preserve clinical waveform)
+  // if (g_motionCalibration)
+  //   g_motionCalibration->applyMotionNoiseReduction(
+  //       blk.filtered_data, blk.sampleValid, WINDOW_SIZE, seq);
 
   // 5. Perform Peak Detection & Heart Rate calculation on this 4000-sample
   // block
@@ -527,6 +526,23 @@ static void dspTask(void *pv)
     {
       processBlock();
     }
+  }
+}
+
+// ==========================================================
+// maintTask — 50 Hz Background Maintenance Task on Core 0
+// Handles IMU, WiFi state machine, and Buzzer without stalling Core 1 DRDY
+// ==========================================================
+static void maintTask(void *pv)
+{
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(20); // 50 Hz (20ms)
+  for (;;)
+  {
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    imu.update();
+    network_update();
+    buzzer_update();
   }
 }
 
@@ -622,22 +638,24 @@ void setup()
   // WiFi + Upload task init
   network_init();
 
-  // Start dedicated DSP processing task on Core 1 (16 KB stack)
-  xTaskCreatePinnedToCore(dspTask, "ecg_dsp", 16384, nullptr, 2,
-                          &s_dspTaskHandle, 1);
-  Serial.println(F("# DSP task started on Core 1 (16KB stack)."));
+  // Start dedicated DSP and Maintenance tasks on Core 0
+  // Keeps Core 1 100% dedicated to uninterrupted 4000 SPS ADS1292R DRDY sampling with ZERO missed samples!
+  xTaskCreatePinnedToCore(dspTask, "ecg_dsp", 16384, nullptr, 1,
+                          &s_dspTaskHandle, 0);
+  xTaskCreatePinnedToCore(maintTask, "ecg_maint", 4096, nullptr, 1,
+                          nullptr, 0);
+  Serial.println(F("# DSP & Maintenance tasks started on Core 0."));
 
   g_lastRateCheck = millis();
   Serial.println(F("# System ready. ESP32-S3 active."));
 }
 
 // ==========================================================
-// loop()
+// loop() — 100% Dedicated to 4000 SPS ADS1292R SPI Capture on Core 1
 // ==========================================================
 void loop()
 {
   ECGSample sample = ads.readECGSample();
-
   if (sample.valid)
   {
     g_totalSamples++;
@@ -647,25 +665,11 @@ void loop()
   }
   else
   {
-    // Yield CPU to FreeRTOS (WiFi & BLE tasks) when sensor is absent.
-    // Prevents Task Watchdog Timer (TG1WDT_SYS_RST) reset loops!
+    // Yield CPU to FreeRTOS when sensor is absent.
     delay(1);
   }
 
-  // Block processing is handled asynchronously by dspTask (Core 1, 32KB stack)
-
-  // Throttle non-ADC tasks to 50 Hz (every 20ms) so they never starve the 4000
-  // SPS DRDY loop!
-  static uint32_t s_lastMaintMs = 0;
   uint32_t now = millis();
-  if ((now - s_lastMaintMs) >= 20)
-  {
-    s_lastMaintMs = now;
-    imu.update();
-    network_update();
-    buzzer_update();
-  }
-
   if ((now - g_lastRateCheck) >= RATE_CHECK_MS)
   {
     float sps =
