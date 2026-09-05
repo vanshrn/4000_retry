@@ -1019,12 +1019,17 @@ static void wsTaskWorker(void *pv)
         if (s_wsMutex && xSemaphoreTake(s_wsMutex, pdMS_TO_TICKS(50)) == pdTRUE)
         {
           s_webSocket.disconnect();
-          s_webSocket.beginSSL(API_HOST, 443, "/ws", "", "");
+#if API_USE_SSL
+          s_webSocket.beginSSL(API_HOST, API_PORT, "/ws", "", "");
+          Serial.printf("[WS-Client] Fast reconnect wss://%s:%d/ws...\n", API_HOST, API_PORT);
+#else
+          s_webSocket.begin(API_HOST, API_PORT, "/ws");
+          Serial.printf("[WS-Client] Fast reconnect ws://%s:%d/ws...\n", API_HOST, API_PORT);
+#endif
           s_webSocket.onEvent(webSocketEvent);
           s_webSocket.setReconnectInterval(2000);
-          s_webSocket.enableHeartbeat(10000, 3000, 2); // 10s ping keep-alive to prevent Render TCP timeouts
+          s_webSocket.enableHeartbeat(10000, 3000, 2); // 10s ping keep-alive to prevent TCP timeouts
           xSemaphoreGive(s_wsMutex);
-          Serial.printf("[WS-Client] Fast reconnect wss://%s/ws...\n", API_HOST);
         }
       }
       wasWifiConnected = true;

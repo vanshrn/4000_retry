@@ -149,7 +149,7 @@ void ECGPipeline::_removeBaselineWander(float *data, int len) {
     s_dc_init = true;
   }
 
-  const double R = 0.999215; // ~0.50 Hz cutoff @ 4000 SPS (AHA/IEC Clinical Standard — perfectly smooth ST & T wave)
+  const double R = 0.998948; // ~0.67 Hz cutoff @ 4000 SPS (AHA/IEC Clinical Standard — holds baseline flat between beats)
   for (int i = 0; i < len; i++) {
     double x = (double)data[i];
     double y = x - s_dc_x_prev + R * s_dc_y_prev;
@@ -332,17 +332,17 @@ static void _applySavitzkyGolayFirmware(float *data, int len) {
 }
 
 // -----------------------------------------------------------
-// Clinical 40 Hz Zero-Phase Low-Pass Filter (Butterworth 2nd-order FiltFilt @ 4000 SPS)
-// Eliminates 50Hz/100Hz powerline hum and EMG muscle tremor with ZERO impulse ringing.
+// Clinical 24 Hz Zero-Phase Low-Pass Filter (Butterworth 2nd-order FiltFilt @ 4000 SPS)
+// Eliminates 50Hz/100Hz powerline hum, muscle tremor, and uneven baseline bumps with ZERO phase distortion.
 // -----------------------------------------------------------
-static void _applyZeroPhaseLowPass40Hz(float *data, int len) {
+static void _applyZeroPhaseLowPass24Hz(float *data, int len) {
   if (len <= 0 || !data) return;
 
-  const double b0 = 0.000944691;
-  const double b1 = 0.001889382;
-  const double b2 = 0.000944691;
-  const double a1 = -1.911197067;
-  const double a2 = 0.914975831;
+  const double b0 = 0.0003460431;
+  const double b1 = 0.0006920862;
+  const double b2 = 0.0003460431;
+  const double a1 = -1.9466975439;
+  const double a2 = 0.9480817163;
 
   static float *temp = nullptr;
   if (!temp) {
@@ -395,16 +395,19 @@ void ECGPipeline::processBlock(Block &blk) {
   for (int i = 0; i < WINDOW_SIZE; i++)
     _workBuf[i] = (float)blk.filtered_data[i];
 
-  // Step 3: Continuous 0.50 Hz High-pass DC filter (AHA/IEC Standard — Zero ST distortion)
+  // Step 3: Continuous 0.67 Hz High-pass DC filter (AHA/IEC Standard — Zero ST distortion, holds isoelectric flat)
   _removeBaselineWander(_workBuf, WINDOW_SIZE);
 
-  // Step 4: Clinical Zero-Phase 50 Hz Notch Filter (Q=6) — completely removes 50 Hz mains hum and ST-segment ripple
+  // Step 4: Clinical Zero-Phase 50 Hz Notch Filter (Q=6) — completely removes 50 Hz mains hum
   _applyZeroPhaseNotch50Hz(_workBuf, WINDOW_SIZE);
 
-  // Step 5: Clinical Zero-Phase 40 Hz Low-Pass Filter (eliminates EMG muscle tremor with zero phase distortion)
-  _applyZeroPhaseLowPass40Hz(_workBuf, WINDOW_SIZE);
+  // Step 5: Clinical Zero-Phase 24 Hz Low-Pass Filter (eliminates EMG muscle tremor and uneven bumps)
+  _applyZeroPhaseLowPass24Hz(_workBuf, WINDOW_SIZE);
 
-  // Step 6: Write back to int32 with Polarity Correction & NaN Protection
+  // Step 6: Zero-Phase Gaussian FIR Smoother (eradicates micro-ripples while preserving crisp R-peaks)
+  _applyFIRLowPass(_workBuf, WINDOW_SIZE);
+
+  // Step 7: Write back to int32 with Polarity Correction & NaN Protection
   for (int i = 0; i < WINDOW_SIZE; i++) {
     float v = _workBuf[i];
     if (isnan(v) || isinf(v)) v = 0.0f;

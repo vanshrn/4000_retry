@@ -348,7 +348,12 @@
   </div>
 
   <script>
-    const SSE_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123';
+    // --- CLOUD BACKEND (Uncomment when deploying to public cloud) ---
+    //const SSE_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123';
+
+    // --- LOCAL PRIVATE OFFLINE BACKEND (Active for local offline PC testing) ---
+    const SSE_URL = 'http://localhost:8000/api/ecg/live/ESP_ECG_123';
+
     const DOWNSAMPLE = 4;
     const MAX_HISTORY_POINTS = 400000; // 100 seconds of continuous 4000 SPS data in memory
 

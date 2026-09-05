@@ -123,9 +123,18 @@
 #define LED_PIN                      21
 
 // ==========================================================
-// Database / API
+// Database / API Configuration
 // ==========================================================
-#define API_HOST                     "ads1292r-code-91eg.onrender.com"
+// --- CLOUD RENDER BACKEND (Uncomment to switch back to public cloud) ---
+//#define API_HOST                     "ads1292r-code-91eg.onrender.com"
+//#define API_PORT                     443
+//#define API_USE_SSL                  1
+
+// --- LOCAL PRIVATE OFFLINE BACKEND (Active for local offline PC testing) ---
+#define API_HOST                     "10.136.125.26"  // PC's IP on Mobile Hotspot
+#define API_PORT                     8000
+#define API_USE_SSL                  0
+
 #define API_ENDPOINT                 "/api/ecg"
 #define API_DEVICE_ID                "ESP_ECG_123"
 #define API_USER_ID                  "ESP_ECG_123"

@@ -28,11 +28,13 @@ from datetime import datetime
 from scipy.signal import butter, filtfilt, find_peaks, iirnotch, savgol_filter
 from scipy.ndimage import uniform_filter1d, median_filter
 
-# ============================================================
-# CONFIGURATION — ADS1292R @ 4000 SPS
-# ============================================================
-API_URL        = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123'
-API_RESULT_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/device_result'
+# --- CLOUD BACKEND (Uncomment when deploying to public cloud) ---
+# API_URL        = 'https://ads1292r-code-91eg.onrender.com/api/ecg/live/ESP_ECG_123'
+# API_RESULT_URL = 'https://ads1292r-code-91eg.onrender.com/api/ecg/device_result'
+
+# --- LOCAL PRIVATE OFFLINE BACKEND (Active for local offline PC testing) ---
+API_URL        = 'http://localhost:8000/api/ecg/live/ESP_ECG_123'
+API_RESULT_URL = 'http://localhost:8000/api/ecg/device_result'
 
 # Display window: 4.0 second scrolling view at 4000 SPS (16000 points)
 WINDOW_SIZE   = 16000     # 4.0 s × 4000 SPS (16000 points)
